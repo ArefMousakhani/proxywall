@@ -111,8 +111,7 @@ class Monitor:
         while True:
             self._wake.clear()
             try:
-                proxy = core.proxy
-                latency = await upstream.probe(proxy, await core.proxy_ips(), core.mark)
+                latency = await core.probe()
                 error = None
             except (upstream.ProxyError, ResolveError, OSError, asyncio.TimeoutError) as exc:
                 error = str(exc) or type(exc).__name__

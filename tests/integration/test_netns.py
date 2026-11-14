@@ -15,6 +15,7 @@ that arrived *directly* shows the host's own address (10.0.0.2), while a
 proxied one does not.
 """
 
+import base64
 import json
 import os
 import shutil
@@ -31,7 +32,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, ROOT)
 
+from proxywall import config, engine  # noqa: E402
 from proxywall.client import Client, DaemonError, DaemonUnavailable  # noqa: E402
+
+XRAY = engine.find_program("xray", "", engine.XRAY_PLACES)
+UUID = "b831381d-6324-4d53-ad4f-8cda48b30811"
 
 IN_NETNS = os.environ.get("PROXYWALL_NETNS_TEST") == "1"
 HOST_IP = "10.0.0.2"
@@ -53,6 +58,12 @@ def http_get(host, port=80, timeout=5, path="/"):
             if not chunk:
                 break
             data += chunk
+            # Complete once the announced body is here: some tunnels (Shadowsocks
+            # 2022 in Xray) pass the server's close on only after a long pause.
+            head, sep, body = data.partition(b"\r\n\r\n")
+            length = [line.split(b":")[1] for line in head.split(b"\r\n") if line.lower().startswith(b"content-length:")]
+            if sep and length and len(body) >= int(length[0]):
+                break
     head, _, body = data.partition(b"\r\n\r\n")
     if not head.startswith(b"HTTP/1.1 200"):
         raise OSError(f"bad reply: {head[:60]!r}")
@@ -659,6 +670,166 @@ class NetnsTest(unittest.TestCase):
         self.configure(ip_check_url=self.TRACE, geo_url="")
         self.wait_state("connected")
         self.assert_proxied("www.example.com")
+
+    # ------------------------------------------------------------ share links (Xray)
+    SERVER = "93.184.216.34"   # a public address: only marked traffic may reach it
+
+    def start_xray_server(self):
+        """An Xray server on the fake internet, one port per protocol."""
+        if not XRAY:
+            self.skipTest("xray is not installed")
+        if "xray" in self.procs:
+            return
+        sys.path.insert(0, HERE)
+        from fake_internet import HOSTS
+        key16 = base64.b64encode(b"0123456789abcdef").decode()
+        clients = {"clients": [{"id": UUID}], "decryption": "none"}
+        inbounds = [
+            {"port": 2001, "protocol": "vless", "settings": clients},
+            {"port": 2002, "protocol": "vmess", "settings": {"clients": [{"id": UUID}]},
+             "streamSettings": {"network": "ws", "wsSettings": {"path": "/vm"}}},
+            {"port": 2004, "protocol": "shadowsocks",
+             "settings": {"method": "aes-256-gcm", "password": "secret", "network": "tcp"}},
+            {"port": 2005, "protocol": "vless", "settings": clients,
+             "streamSettings": {"network": "grpc", "grpcSettings": {"serviceName": "svc"}}},
+            {"port": 2006, "protocol": "vless", "settings": clients,
+             "streamSettings": {"network": "xhttp", "xhttpSettings": {"path": "/x"}}},
+            {"port": 2007, "protocol": "shadowsocks",
+             "settings": {"method": "2022-blake3-aes-128-gcm", "password": key16, "network": "tcp"}},
+            {"port": 2009, "protocol": "trojan", "settings": {"clients": [{"password": "secret"}]},
+             "streamSettings": {"network": "httpupgrade", "httpupgradeSettings": {"path": "/up"}}},
+        ]
+        if self.cert:
+            tls = {"certificates": [{"certificateFile": self.cert[0], "keyFile": self.cert[1]}]}
+            inbounds += [
+                {"port": 2003, "protocol": "trojan", "settings": {"clients": [{"password": "secret"}]},
+                 "streamSettings": {"network": "raw", "security": "tls", "tlsSettings": tls}},
+                {"port": 2008, "protocol": "vless", "settings": clients,
+                 "streamSettings": {"network": "ws", "security": "tls", "tlsSettings": tls,
+                                    "wsSettings": {"path": "/ws"}}},
+            ]
+        for inbound in inbounds:
+            inbound["listen"] = "0.0.0.0"
+        path = os.path.join(self.tmp, "xray-server.json")
+        with open(path, "w") as handle:
+            json.dump({"log": {"loglevel": "warning"}, "dns": {"hosts": HOSTS}, "inbounds": inbounds,
+                       "outbounds": [{"protocol": "freedom", "settings": {"domainStrategy": "UseIPv4"}}]}, handle)
+        with open(os.path.join(self.tmp, "xray-server.log"), "a") as output:
+            type(self).procs["xray"] = subprocess.Popen(
+                ["ip", "netns", "exec", "wan", XRAY, "run", "-c", path], stdout=output, stderr=output)
+
+        def listening():
+            return sh("ip netns exec wan sh -c 'ss -ltn | grep -q :2001'", check=False).returncode == 0
+        self.wait_for(listening, "the Xray server to start")
+
+    def stop_xray_server(self):
+        proc = self.procs.pop("xray")
+        proc.terminate()
+        proc.wait()
+        sh("ip netns pids wan | xargs -r -n1 sh -c 'grep -qa xray-server /proc/$0/cmdline && kill -9 $0'", check=False)
+        time.sleep(0.3)
+
+    def share_links(self):
+        vmess = base64.b64encode(json.dumps({
+            "v": "2", "ps": "vmess over websocket", "add": "example.com", "port": "2002", "id": UUID, "aid": "0",
+            "net": "ws", "path": "/vm", "host": "example.com", "tls": ""}).encode()).decode()
+        secret = base64.urlsafe_b64encode(b"aes-256-gcm:secret").decode().rstrip("=")
+        key16 = base64.b64encode(b"0123456789abcdef").decode().replace("=", "%3D")
+        share = {
+            "vless": f"vless://{UUID}@{self.SERVER}:2001?encryption=none&type=tcp#plain",
+            "vless by name": f"vless://{UUID}@example.com:2001?type=tcp#by-name",
+            "vmess ws": f"vmess://{vmess}",
+            "shadowsocks": f"ss://{secret}@{self.SERVER}:2004#ss",
+            "shadowsocks 2022": f"ss://2022-blake3-aes-128-gcm:{key16}@{self.SERVER}:2007#ss2022",
+            "vless grpc": f"vless://{UUID}@{self.SERVER}:2005?type=grpc&serviceName=svc#grpc",
+            "vless xhttp": f"vless://{UUID}@{self.SERVER}:2006?type=xhttp&path=%2Fx#xhttp",
+            "trojan httpupgrade": f"trojan://secret@{self.SERVER}:2009?security=none&type=httpupgrade&path=%2Fup#tr",
+        }
+        if self.cert:
+            share["trojan tls"] = f"trojan://secret@{self.SERVER}:2003?sni=test&allowInsecure=1#trojan"
+            share["vless ws tls"] = (f"vless://{UUID}@example.com:2008?security=tls&sni=test&allowInsecure=1"
+                                     "&type=ws&path=%2Fws#wss")
+        return share
+
+    def use_link(self, link, wait="connected"):
+        self.reset(wait=wait, proxy=config.parse_proxy_url(link))
+
+    def test_40_every_share_link_protocol_carries_traffic(self):
+        self.start_xray_server()
+        for name, link in self.share_links().items():
+            with self.subTest(protocol=name):
+                self.use_link(link)
+                reply, _ = self.assert_proxied("www.example.com")
+                self.assertEqual(reply["host"], "www.example.com")
+                self.assert_proxied("93.184.216.34")            # a literal address
+                self.assert_direct("site.ir")                   # exclusions are untouched
+                self.assertFalse([line for line in self.wan_log() if line.startswith("dns") and "www.example" in line])
+
+    def test_41_engine_port_is_for_the_daemon_only(self):
+        self.start_xray_server()
+        self.use_link(self.share_links()["vless"])
+        port = self.client.get_config()["engine_port"]
+        with self.assertRaises(OSError):                        # another program on this machine
+            socket.create_connection(("127.0.0.1", port), timeout=3).close()
+        self.assert_proxied("www.example.com")                  # while the daemon uses it happily
+
+    def test_42_dead_link_server_blocks_and_recovers(self):
+        self.start_xray_server()
+        self.use_link(self.share_links()["vless"])
+        self.assert_proxied("www.example.com")
+        self.stop_xray_server()
+        self.assert_blocked("www.example.com")                  # never direct
+        self.wait_state("unreachable", 40)
+        self.assert_blocked("www.example.com")
+        self.start_xray_server()
+        self.wait_state("connected", 40)
+        self.assert_proxied("www.example.com")
+
+    def test_43_engine_crash_blocks_and_recovers(self):
+        self.start_xray_server()
+        self.use_link(self.share_links()["shadowsocks"])
+        self.assert_proxied("www.example.com")
+        sh("pkill -9 -f 'run -c .*/run/engine[.]json'")
+        self.assert_blocked("www.example.com")                  # the helper is gone: closed, not direct
+
+        def works():
+            try:
+                return http_get("www.example.com")["peer"] != HOST_IP
+            except OSError:
+                return False
+        self.wait_for(works, "the engine to be restarted", 30)
+
+    def test_44_wrong_link_secret_is_reported_and_blocks(self):
+        self.start_xray_server()
+        wrong = self.share_links()["vless"].replace(UUID, "11111111-2222-3333-4444-555555555555")
+        self.use_link(wrong, wait="unreachable")
+        self.assert_blocked("www.example.com")
+        self.assertTrue(self.client.status()["error"])
+
+    def test_45_country_gate_applies_to_link_servers(self):
+        self.start_xray_server()
+        self.set_exit_country("IR")
+        self.reset(wait="country_blocked", proxy=config.parse_proxy_url(self.share_links()["vless"]),
+                   ip_check_url=self.TRACE, blocked_countries=["IR"])
+        self.assert_blocked("www.example.com")
+        self.set_exit_country("DE")
+        self.wait_state("connected", 25)
+        self.assert_proxied("www.example.com")
+
+    def test_46_marked_pipe_is_the_only_way_out_for_ssh(self):
+        """ssh reaches its server through proxywall.pipe: marked it passes, unmarked it does not."""
+        self.reset(kill_switch=True)
+        request = b"GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n"
+        mark = str(self.client.get_config()["fwmark"])
+
+        def through_pipe(mark_value):
+            return subprocess.run([sys.executable, "-m", "proxywall.pipe", "93.184.216.34", "80", mark_value],
+                                  input=request, capture_output=True, cwd=ROOT, timeout=30)
+        marked = through_pipe(mark)
+        self.assertIn(b"200 OK", marked.stdout)
+        self.assertIn(HOST_IP.encode(), marked.stdout)          # it went out directly, as the daemon's own traffic
+        unmarked = through_pipe("0")
+        self.assertNotIn(HOST_IP.encode(), unmarked.stdout)     # captured like any other program
 
     def test_99_final_disconnect_cleans_up(self):
         self.configure(kill_switch=False)

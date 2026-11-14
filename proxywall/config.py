@@ -7,15 +7,21 @@ import os
 import re
 from urllib.parse import unquote, urlsplit
 
+from . import links
 from .geodata import COUNTRIES
 from .rules import normalize_list
 
-PROXY_TYPES = ("socks5", "http")
+NATIVE_TYPES = ("socks5", "http")                       # spoken by ProxyWall itself
+ENGINE_TYPES = links.ENGINE_KINDS + ("ssh",)            # need a helper process (Xray, ssh)
+PROXY_TYPES = NATIVE_TYPES + ENGINE_TYPES
 LOG_LEVELS = ("debug", "info", "warning", "error")
 _HOST_RE = re.compile(r"^(?=.{1,253}$)([a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9_])?)(\.[a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9_])?)*$")
 
 DEFAULTS = {
-    "proxy": {"type": "socks5", "host": "", "port": 1080, "username": "", "password": ""},
+    # type: socks5 | http | ssh | vless | vmess | trojan | shadowsocks. The last four
+    # are described by `link` (a share link); host and port are then taken from it.
+    "proxy": {"type": "socks5", "host": "", "port": 1080, "username": "", "password": "",
+              "link": "", "private_key": ""},
     # Block all traffic whenever the proxy is not connected (also after reboot).
     "kill_switch": False,
     # Let private/local networks bypass the proxy.
@@ -39,6 +45,10 @@ DEFAULTS = {
     "country_check_seconds": 5,
     "tcp_port": 47201,
     "dns_port": 47253,
+    # Local port of the helper process for ssh and share-link servers.
+    "engine_port": 47210,
+    # Path of the Xray program. Empty = look in the usual places.
+    "engine_path": "",
     "fwmark": 0x5057,
     "log_level": "info",
 }
@@ -57,6 +67,13 @@ def defaults():
 def parse_proxy_url(url):
     """``socks5://user:pass@host:1080`` -> proxy dict. Raises ConfigError."""
     text = url.strip()
+    if links.is_engine_link(text):
+        try:
+            server = links.parse(text)
+        except links.LinkError as exc:
+            raise ConfigError(str(exc)) from None
+        return {"type": server["kind"], "host": server["host"], "port": server["port"],
+                "username": "", "password": "", "link": text}
     if "://" not in text:
         text = "socks5://" + text
     try:
@@ -65,17 +82,19 @@ def parse_proxy_url(url):
     except ValueError:
         raise ConfigError(f"'{url}' is not a valid proxy address") from None
     scheme = {"socks5": "socks5", "socks5h": "socks5", "socks": "socks5",
-              "http": "http"}.get(parts.scheme.lower())
+              "http": "http", "ssh": "ssh"}.get(parts.scheme.lower())
     if scheme is None:
-        raise ConfigError(f"unsupported proxy type '{parts.scheme}' (use socks5:// or http://)")
+        raise ConfigError(f"unsupported proxy type '{parts.scheme}' "
+                          "(use socks5://, http://, ssh://, vless://, vmess://, trojan:// or ss://)")
     if not parts.hostname:
         raise ConfigError(f"'{url}' has no host")
     return {
         "type": scheme,
         "host": parts.hostname,
-        "port": port or (1080 if scheme == "socks5" else 8080),
+        "port": port or {"socks5": 1080, "http": 8080, "ssh": 22}[scheme],
         "username": unquote(parts.username or ""),
         "password": unquote(parts.password or ""),
+        "link": "",
     }
 
 
@@ -99,8 +118,8 @@ def merge(base, patch):
             for sub, subval in value.items():
                 if sub not in DEFAULTS["proxy"]:
                     errors.append(f"unknown setting 'proxy.{sub}'")
-                elif sub == "password" and subval is None:
-                    continue
+                elif sub in ("password", "link", "private_key") and subval is None:
+                    continue  # "keep what is stored": clients never have to read secrets back
                 else:
                     out["proxy"][sub] = subval
         else:
@@ -124,8 +143,33 @@ def validate(raw):
     errors = []
 
     proxy = cfg["proxy"]
-    if proxy["type"] not in PROXY_TYPES:
-        errors.append("proxy type must be 'socks5' or 'http'")
+    for field in ("link", "private_key"):
+        if not isinstance(proxy[field], str):
+            errors.append(f"proxy {field} must be text")
+            proxy[field] = ""
+    if proxy["type"] == "link" or proxy["type"] in links.ENGINE_KINDS:
+        # A share link describes the whole server: everything else follows from it.
+        try:
+            server = links.parse(proxy["link"])
+            proxy.update(type=server["kind"], host=server["host"], port=server["port"],
+                         username="", password="", private_key="", link=proxy["link"].strip())
+        except links.LinkError as exc:
+            errors.append(str(exc))
+    elif proxy["type"] not in PROXY_TYPES:
+        errors.append("proxy type must be one of " + ", ".join(PROXY_TYPES))
+    else:
+        proxy["link"] = ""
+        if proxy["type"] != "ssh":
+            proxy["private_key"] = ""
+    if proxy["type"] == "ssh" and isinstance(proxy["host"], str) and proxy["host"].strip():
+        if not proxy["username"]:
+            errors.append("an SSH tunnel needs a username")
+        key = proxy["private_key"].strip()
+        if key and ("PRIVATE KEY-----" not in key or len(key) > 20000):
+            errors.append("that does not look like an SSH private key file")
+        elif not key and not proxy["password"]:
+            errors.append("an SSH tunnel needs a password or a private key")
+        proxy["private_key"] = key
     host = proxy["host"]
     if not isinstance(host, str):
         errors.append("proxy host must be text")
@@ -193,12 +237,14 @@ def validate(raw):
     if isinstance(age, bool) or not isinstance(age, int) or not 0 <= age <= 300:
         errors.append("'country_check_seconds' must be a number between 0 and 300")
 
-    for key in ("tcp_port", "dns_port"):
+    for key in ("tcp_port", "dns_port", "engine_port"):
         value = cfg[key]
         if isinstance(value, bool) or not isinstance(value, int) or not 1024 <= value <= 65535:
             errors.append(f"'{key}' must be a number between 1024 and 65535")
-    if cfg["tcp_port"] == cfg["dns_port"]:
-        errors.append("'tcp_port' and 'dns_port' must differ")
+    if len({cfg["tcp_port"], cfg["dns_port"], cfg["engine_port"]}) != 3:
+        errors.append("'tcp_port', 'dns_port' and 'engine_port' must differ")
+    if not isinstance(cfg["engine_path"], str) or (cfg["engine_path"] and not cfg["engine_path"].startswith("/")):
+        errors.append("'engine_path' must be an absolute path or empty")
     mark = cfg["fwmark"]
     if isinstance(mark, bool) or not isinstance(mark, int) or not 1 <= mark <= 0xFFFFFFFF:
         errors.append("'fwmark' must be a number between 1 and 4294967295")
@@ -213,7 +259,17 @@ def validate(raw):
 def public_view(cfg):
     """Configuration as shown to clients: the password never leaves the daemon."""
     out = copy.deepcopy(cfg)
-    out["proxy"]["password_set"] = bool(out["proxy"].pop("password"))
+    proxy = out["proxy"]
+    proxy["password_set"] = bool(proxy.pop("password"))
+    proxy["key_set"] = bool(proxy.pop("private_key"))
+    link = proxy.pop("link")
+    proxy["link_set"] = bool(link)
+    proxy["name"] = ""
+    if link:
+        try:
+            proxy["name"] = links.parse(link)["name"]
+        except links.LinkError:
+            pass
     return out
 
 

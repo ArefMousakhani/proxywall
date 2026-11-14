@@ -1,4 +1,4 @@
-# ProxyWall: system-wide SOCKS5 / HTTP proxy client for Linux with a kill switch
+# ProxyWall: system-wide proxy client for Linux with a kill switch (SOCKS5, HTTP, SSH, VLESS, VMess, Trojan, Shadowsocks)
 
 [![Latest release](https://img.shields.io/github/v/release/ArefMousakhani/proxywall?label=release)](https://github.com/ArefMousakhani/proxywall/releases/latest)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -6,7 +6,7 @@
 
 **English** | [فارسی](README.fa.md)
 
-**Send all traffic of your Linux desktop through a SOCKS5 or HTTP proxy, and never go online without it.**
+**Send all traffic of your Linux desktop through a SOCKS5 or HTTP proxy, an SSH server, or a VLESS / VMess / Trojan / Shadowsocks server, and never go online without it.**
 
 ProxyWall turns a plain proxy (`192.168.1.5:1080`, a proxy shared from your phone, an SSH tunnel, a V2Ray / Xray / sing-box / Shadowsocks local port, a corporate HTTP proxy…) into something that behaves like an always-on VPN client: every application is captured, DNS cannot leak, and a firewall kill switch keeps the machine closed whenever the proxy is unreachable. There is no "fall back to a direct connection".
 
@@ -18,6 +18,7 @@ ProxyWall turns a plain proxy (`192.168.1.5:1080`, a proxy shared from your phon
 <p align="center">
   <img src="docs/images/country-blocked.png" width="240" alt="ProxyWall blocking all traffic because the proxy comes out in a blocked country">
   <img src="docs/images/countries.png" width="240" alt="ProxyWall country list with flags: choose the countries to block">
+  <img src="docs/images/settings-link.png" width="240" alt="ProxyWall settings: SOCKS5, HTTP, SSH or a VLESS / VMess / Trojan / Shadowsocks share link">
 </p>
 
 <p align="center">
@@ -53,6 +54,8 @@ ProxyWall fixes all five with one switch.
 - **No DNS leaks.** Applications never learn real addresses for proxied sites; host names are resolved by the proxy.
 - **Exclusion list (split tunnelling).** Domains (`*.ir`, `example.com`), single addresses and networks (`10.1.0.0/16`) that should bypass the proxy.
 - **SOCKS5 and HTTP CONNECT** proxies, with optional username and password.
+- **SSH tunnels** (password or private key), using the system's OpenSSH.
+- **VLESS, VMess, Trojan and Shadowsocks** servers from a share link (`vless://`, `vmess://`, `trojan://`, `ss://`), including TLS, REALITY, XTLS-Vision, WebSocket, gRPC, HTTPUpgrade and XHTTP, through [Xray](https://github.com/XTLS/Xray-core).
 - **Small and auditable.** Pure Python standard library plus `nftables`; no bundled binaries. The privileged service runs with a single capability inside a systemd sandbox.
 - **Block exit countries.** Pick the countries your traffic must never come out in. Nothing is sent until the exit has been checked, and if the proxy starts coming out in one of them (or its country cannot be checked), everything is blocked at once.
 - **See where you come out.** The window shows the country flag, city, a small world map and the coordinates of your public IP; the tray icon turns into that country's flag while you are connected.
@@ -65,7 +68,7 @@ Requirements: a systemd-based distribution with Python ≥ 3.10, `nftables` and 
 **From a release (Debian, Ubuntu, Linux Mint):** download `proxywall_<version>_all.deb` from the [latest release](https://github.com/ArefMousakhani/proxywall/releases/latest), then
 
 ```sh
-sudo apt install ./proxywall_1.1.0_all.deb
+sudo apt install ./proxywall_1.2.0_all.deb
 ```
 
 **From source:**
@@ -74,7 +77,7 @@ sudo apt install ./proxywall_1.1.0_all.deb
 git clone https://github.com/ArefMousakhani/proxywall.git
 cd proxywall
 make deb
-sudo apt install ./dist/proxywall_1.1.0_all.deb
+sudo apt install ./dist/proxywall_1.2.0_all.deb
 ```
 
 `apt` pulls in the few dependencies (`python3-gi`, `nftables`, …), starts the `proxywall` service and adds **ProxyWall** to the application menu (*Internet* category).
@@ -82,7 +85,10 @@ sudo apt install ./dist/proxywall_1.1.0_all.deb
 ## Use
 
 1. Open **ProxyWall** from the menu.
-2. Click the gear, enter the proxy (type, address, port, and credentials if it needs them) and **Save**. You can also paste a whole URL such as `socks5://user:pass@192.168.1.5:1080` into the address box.
+2. Click the gear, choose the kind of server and **Save**:
+   - **SOCKS5 / HTTP:** address, port, and credentials if it needs them. You can also paste a whole URL such as `socks5://user:pass@192.168.1.5:1080` into the address box.
+   - **SSH:** address, port, user name, and a password or a private key file.
+   - **LINK:** paste the `vless://`, `vmess://`, `trojan://` or `ss://` link of your server.
 3. Press the big power button.
 
 | The window says | Meaning |
@@ -96,6 +102,21 @@ sudo apt install ./dist/proxywall_1.1.0_all.deb
 | **OFF** (grey) | Disconnected, firewall off: normal direct networking. |
 
 Closing the window does not disconnect anything. The connection belongs to a system service; the window and the tray icon are only a remote control.
+
+### Other protocols (SSH, VLESS, VMess, Trojan, Shadowsocks)
+
+ProxyWall speaks SOCKS5 and HTTP itself. For the others it starts a helper next to the service and uses it as its proxy, so the firewall, the bypass list and the blocked countries work exactly the same:
+
+| Server | Helper | What you need |
+| --- | --- | --- |
+| SSH | `ssh` (OpenSSH client) | already installed on most systems; otherwise `sudo apt install openssh-client` |
+| VLESS, VMess, Trojan, Shadowsocks | [Xray](https://github.com/XTLS/Xray-core) | the `xray` program in `/usr/local/bin`, `/usr/bin` or anywhere on the `PATH` ([install instructions](https://github.com/XTLS/Xray-install)); a different place can be set with `proxywall config engine_path=/path/to/xray` |
+
+The helper's own connection to your server is the only thing the firewall lets out, the same way as with a plain proxy. Its local port is closed to every other program.
+
+Supported in share links: TLS, REALITY and XTLS-Vision; raw TCP, WebSocket, gRPC, HTTPUpgrade and XHTTP transports; Shadowsocks AEAD and 2022 ciphers. Not supported: Hysteria, TUIC, WireGuard, NaiveProxy and Shadowsocks plugins (Xray does not speak them), and subscriptions.
+
+The first time an SSH server is used, its host key is remembered in `/var/lib/proxywall/known_hosts`; if it later changes, ProxyWall refuses to connect and says so.
 
 ### The Firewall switch
 
@@ -140,6 +161,8 @@ What you should know:
 
 ```sh
 proxywall set-proxy socks5://user:pass@192.168.1.5:1080
+proxywall set-proxy 'vless://uuid@example.com:443?security=reality&pbk=...&type=tcp'   # or vmess:// trojan:// ss://
+proxywall set-proxy ssh://me@example.com --key ~/.ssh/id_ed25519
 proxywall exclude add '*.ir' 10.1.0.0/16
 proxywall block-country add IR
 proxywall kill-switch on
@@ -174,7 +197,7 @@ More detail, including the exact rule set, is in [docs/ARCHITECTURE.md](docs/ARC
 
 Read these before relying on ProxyWall:
 
-- **TCP and DNS only.** SOCKS5 UDP relaying is not implemented and HTTP proxies cannot carry UDP. While the firewall is active, other UDP (QUIC/HTTP3, most VoIP and games) and ping are *rejected*, not tunnelled. Browsers fall back to TCP automatically.
+- **TCP and DNS only.** UDP relaying is not implemented for any kind of server, and HTTP proxies cannot carry UDP. While the firewall is active, other UDP (QUIC/HTTP3, most VoIP and games) and ping are *rejected*, not tunnelled. Browsers fall back to TCP automatically.
 - **A proxy is not encryption.** ProxyWall guarantees that traffic goes to your proxy or nowhere. Whether the hop to the proxy is encrypted depends on the proxy; plain SOCKS5 and HTTP proxies are not.
 - **HTTP proxies must allow `CONNECT` to the ports you use.** Many only allow 443. SOCKS5 is the better choice when you have one.
 - **A proxy running on this same computer** (for example a local tunnel client listening on `127.0.0.1`) must be able to reach its own server: add that server's address to the bypass list, otherwise its traffic is captured too and loops.
@@ -187,7 +210,10 @@ Read these before relying on ProxyWall:
 **How do I use a SOCKS5 proxy for the whole system on Linux?**
 Install ProxyWall, enter the proxy address and press connect. Every program is captured by the firewall; nothing has to be configured per application.
 
-**Does it work with V2Ray, Xray, sing-box, Shadowsocks, or `ssh -D`?**
+**Does it work with VLESS, VMess, Trojan, Shadowsocks or SSH servers?**
+Yes, directly: paste the share link, or fill in the SSH form. See [Other protocols](#other-protocols-ssh-vless-vmess-trojan-shadowsocks).
+
+**Does it work with another client such as sing-box, NekoRay or `ssh -D`?**
 Yes. Anything that offers a SOCKS5 or HTTP proxy port works. If that client runs on the *same* computer, add its remote server's IP address to the bypass list (see [Limitations](#limitations)).
 
 **Is ProxyWall a VPN?**
@@ -209,7 +235,7 @@ The service and the command line work everywhere. The window is GTK 3 and runs o
 
 - The service (`proxywalld`) runs as root with **only `CAP_NET_ADMIN`**, under systemd sandboxing (`ProtectSystem=strict`, `NoNewPrivileges`, system-call filter, no access to `/home`).
 - It is controlled over a Unix socket. Root and regular login accounts may use it; system and service accounts may not. See [SECURITY.md](SECURITY.md).
-- The proxy password is stored in `/var/lib/proxywall/config.json`, readable by root only, and is never sent back to the interface.
+- The proxy password, share link and SSH private key are stored in `/var/lib/proxywall/config.json`, readable by root only, and are never sent back to the interface.
 - The public IP shown in the window is fetched through the proxy from `https://www.cloudflare.com/cdn-cgi/trace`, and its city and coordinates from `https://ipwho.is/`. Both requests travel through the proxy, so those services see the proxy's address, not yours. Set `geo_url` to an empty value to skip the second one (the map then shows the capital of the country), or `ip_check_url` to turn both off.
 
 ## Troubleshooting

@@ -6,10 +6,14 @@ Settings are changed from the window, with the `proxywall` command, or both; the
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `proxy.type` | `socks5` | `socks5` or `http` (HTTP CONNECT) |
-| `proxy.host` | *(empty)* | IP address or host name of the proxy |
+| `proxy.type` | `socks5` | `socks5`, `http` (HTTP CONNECT), `ssh`, or `vless` / `vmess` / `trojan` / `shadowsocks` (set by the link) |
+| `proxy.host` | *(empty)* | IP address or host name of the proxy (taken from the link for link servers) |
 | `proxy.port` | `1080` | port of the proxy |
-| `proxy.username`, `proxy.password` | *(empty)* | credentials, if the proxy needs them |
+| `proxy.username`, `proxy.password` | *(empty)* | credentials, if the proxy needs them; for `ssh` the login (the password also unlocks an encrypted key) |
+| `proxy.private_key` | *(empty)* | `ssh` only: the text of a private key file |
+| `proxy.link` | *(empty)* | the share link of a VLESS, VMess, Trojan or Shadowsocks server |
+| `engine_path` | *(empty)* | where the `xray` program is; empty = `/usr/lib/proxywall`, `/usr/local/bin`, `/usr/bin`, `/opt/xray`, then the `PATH` |
+| `engine_port` | `47210` | local port of the helper process (`xray` or `ssh`) |
 | `kill_switch` | `false` | the *Firewall* switch: block all traffic whenever you are not connected, also after a reboot |
 | `allow_lan` | `true` | private and link-local networks bypass the proxy |
 | `exclude` | `[]` | domains, addresses and networks that bypass the proxy |
@@ -75,7 +79,8 @@ Address exclusions are enforced by the firewall itself and cover every protocol.
 proxywall status [--json]            show the connection status (exit code 0 when healthy)
 proxywall connect [--wait SECONDS]   send all traffic through the proxy
 proxywall disconnect                 stop using the proxy
-proxywall set-proxy URL              socks5://[user:pass@]host[:port]  or  http://...
+proxywall set-proxy URL [--key FILE] socks5://[user:pass@]host[:port], http://..., ssh://user[:pass]@host[:port],
+                                     or a vless:// vmess:// trojan:// ss:// share link
 proxywall kill-switch on|off         the Firewall switch
 proxywall lan on|off                 Allow LAN
 proxywall exclude list
@@ -91,6 +96,8 @@ Examples:
 
 ```sh
 proxywall set-proxy 'socks5://alice:s3cret@192.168.1.5:1080'
+proxywall set-proxy 'trojan://s3cret@example.com:443?sni=example.com#my-server'
+proxywall set-proxy ssh://alice@example.com:22 --key ~/.ssh/id_ed25519
 proxywall config remote_dns=9.9.9.9 log_level=debug
 proxywall config ip_check_url=            # never look up the public IP (and no location)
 proxywall config geo_url=                 # no city lookup: the map shows the country's capital

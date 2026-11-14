@@ -1,0 +1,3 @@
+#!/bin/sh
+# Answers the password prompt of ssh (see proxywall/engine.py).
+printf "%s\n" "$PROXYWALL_SSH_SECRET"

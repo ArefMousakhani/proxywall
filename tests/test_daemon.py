@@ -86,7 +86,8 @@ class DaemonTest(unittest.TestCase):
         self.assertEqual(self.cli("exclude", "add", "not valid!").returncode, 1)
         shown = json.loads(self.cli("config").stdout)
         self.assertEqual(shown["proxy"], {"type": "socks5", "host": "127.0.0.1", "port": 9,
-                                          "username": "bob", "password_set": True})
+                                          "username": "bob", "password_set": True,
+                                          "key_set": False, "link_set": False, "name": ""})
         self.assertEqual(self.cli("kill-switch", "on").returncode, 0)
         result = self.cli("connect", "--wait", "8")
         self.assertEqual(result.returncode, 3)

@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.2.0] - 2026-11-14
+
+### Added
+
+- SSH tunnels as the way out (password or private key), through the system's OpenSSH client. The server's host key is pinned on first use.
+- VLESS, VMess, Trojan and Shadowsocks servers from a share link, through Xray: TLS, REALITY, XTLS-Vision, WebSocket, gRPC, HTTPUpgrade, XHTTP, Shadowsocks AEAD and 2022.
+- The settings window has four kinds of server: SOCKS5, HTTP, SSH and LINK. `proxywall set-proxy` accepts the same links and `ssh://`, with `--key` for a private key.
+- New settings `proxy.link`, `proxy.private_key`, `engine_path`, `engine_port`.
+
+The firewall, bypass list and blocked countries apply to these servers unchanged: the helper process is reached only by the service, and its connection to the server is the only one the firewall lets out.
+
 ## [1.1.0] - 2026-11-14
 
 ### Added
@@ -29,5 +40,6 @@ First release.
 - GTK 3 desktop interface with tray icon, `proxywall` command line tool.
 - Debian package with a sandboxed systemd service.
 
+[1.2.0]: https://github.com/ArefMousakhani/proxywall/releases/tag/v1.2.0
 [1.1.0]: https://github.com/ArefMousakhani/proxywall/releases/tag/v1.1.0
 [1.0.0]: https://github.com/ArefMousakhani/proxywall/releases/tag/v1.0.0

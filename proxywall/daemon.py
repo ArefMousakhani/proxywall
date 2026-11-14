@@ -10,12 +10,13 @@ import signal
 import sys
 import time
 
-from . import __version__, config, firewall, paths, upstream
+from . import __version__, config, dnsmsg, firewall, paths, upstream
 from .control import ControlServer
 from .dnsserver import DnsServer
+from .engine import Engine
 from .fakeip import FakeIPPool
 from .monitor import Monitor
-from .resolver import DirectResolver
+from .resolver import DirectResolver, ResolveError, exchange_over_stream
 from .rules import ExcludeRules
 from .tproxy import TransparentProxy
 
@@ -73,6 +74,7 @@ class Core:
         self.tproxy = TransparentProxy(self)
         self.dns = DnsServer(self)
         self.monitor = Monitor(self)
+        self.engine = Engine(self)
         self.control = ControlServer(self, paths.SOCKET_PATH)
         self._lock = asyncio.Lock()
         self._stop = asyncio.Event()
@@ -86,6 +88,36 @@ class Core:
     @property
     def proxy_label(self):
         return config.proxy_label(self.cfg)
+
+    @property
+    def engine_kind(self):
+        """'ssh', 'vless', ... when the server needs a helper process, else None."""
+        kind = self.cfg["proxy"]["type"]
+        return kind if kind in config.ENGINE_TYPES else None
+
+    async def probe(self):
+        """Is the way out working? Returns the latency in ms or raises ProxyError."""
+        if not self.engine_kind:
+            return await upstream.probe(self.proxy, await self.proxy_ips(), self.mark)
+        # The helper's local port always answers, so that proves nothing:
+        # ask for something through the tunnel and wait for the reply.
+        started = time.monotonic()
+        sock = None
+        try:
+            sock, _ = await self.dial_proxy(self.cfg["remote_dns"], 53)
+            await exchange_over_stream(sock, dnsmsg.build_query("example.com", 1), timeout=6.0)
+        except (upstream.ProxyError, ResolveError, OSError, asyncio.TimeoutError) as exc:
+            if self.engine.error:
+                reason = self.engine.error
+            elif not self.engine.running:
+                reason = "the tunnel is starting"
+            else:
+                reason = f"no answer through the server ({str(exc) or 'timed out'})"
+            raise upstream.ProxyError("unreachable", reason) from None
+        finally:
+            if sock is not None:
+                sock.close()
+        return int((time.monotonic() - started) * 1000)
 
     async def proxy_ips(self):
         host = self.proxy.host
@@ -126,7 +158,10 @@ class Core:
         self.mark = cfg["fwmark"] if isinstance(self.firewall, firewall.NftFirewall) else 0
         self.direct.mark = self.mark
         p = cfg["proxy"]
-        self.proxy = upstream.ProxySettings(p["type"], p["host"], p["port"], p["username"], p["password"])
+        if p["type"] in config.ENGINE_TYPES:
+            self.proxy = self.engine.settings(p["type"])  # the daemon talks to the local helper
+        else:
+            self.proxy = upstream.ProxySettings(p["type"], p["host"], p["port"], p["username"], p["password"])
 
     def _save_state(self):
         try:
@@ -163,7 +198,8 @@ class Core:
                 listen_error = str(exc)
                 log.error("%s", listen_error)
             bypass4, bypass6 = self.rules.bypass_sets()
-            script = firewall.render(cfg["tcp_port"], cfg["dns_port"], cfg["fwmark"], bypass4, bypass6)
+            script = firewall.render(cfg["tcp_port"], cfg["dns_port"], cfg["fwmark"], bypass4, bypass6,
+                                     engine_port=cfg["engine_port"])
             try:
                 self.firewall.apply(script)
                 self.active = True
@@ -186,6 +222,10 @@ class Core:
                 await self.dns.stop()
                 self._save_pool()
 
+        if self.enabled and self.active and self.engine_kind and cfg["proxy"]["host"]:
+            await self.engine.ensure(cfg["proxy"])
+        else:
+            await self.engine.stop()
         if self.enabled and self.active:
             self.monitor.start()
         elif self.monitor.running:
@@ -214,7 +254,7 @@ class Core:
             "allow_lan": self.cfg["allow_lan"],
             "firewall_active": self.active,
             "proxy": self.proxy_label,
-            "proxy_configured": bool(self.proxy.host),
+            "proxy_configured": bool(self.cfg["proxy"]["host"]),
             "since": monitor.since if self.enabled else None,
             "latency_ms": monitor.latency_ms,
             "public_ip": monitor.public_ip,
@@ -243,6 +283,8 @@ class Core:
                 "blocked_countries", "country_check_seconds", "ip_check_url", "geo_url"))
             ports_changed = (new["tcp_port"], new["dns_port"], new["fwmark"]) != (
                 self.cfg["tcp_port"], self.cfg["dns_port"], self.cfg["fwmark"])
+            proxy_changed = proxy_changed or (new["engine_port"], new["engine_path"]) != (
+                self.cfg["engine_port"], self.cfg["engine_path"])
             config.save(paths.CONFIG_FILE, new)
             self.cfg, self.config_error = new, None
             self._adopt_config()
@@ -259,7 +301,7 @@ class Core:
 
     async def cmd_connect(self, _request):
         async with self._lock:
-            if not self.proxy.host:
+            if not self.cfg["proxy"]["host"]:
                 raise CommandError("Set the proxy address first")
             if self.enabled and self.active and not self.error:
                 return {}
@@ -317,6 +359,7 @@ class Core:
             saver.cancel()
             await self.control.stop()
             await self.monitor.stop()
+            await self.engine.stop()
             await self.tproxy.stop()
             await self.dns.stop()
             self._save_pool()

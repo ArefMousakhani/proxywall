@@ -23,6 +23,7 @@ install -d "$pkg/DEBIAN" "$pkg/usr/bin" "$pkg/usr/lib/proxywall/proxywall/gui" \
     "$pkg/usr/share/doc/proxywall"
 
 install -m 644 "$root"/proxywall/*.py "$pkg/usr/lib/proxywall/proxywall/"
+install -m 755 "$root/proxywall/ssh-askpass" "$pkg/usr/lib/proxywall/proxywall/"
 install -m 644 "$root"/proxywall/gui/*.py "$root"/proxywall/gui/style.css "$pkg/usr/lib/proxywall/proxywall/gui/"
 install -m 755 "$here/bin/proxywalld" "$pkg/usr/lib/proxywall/proxywalld"
 install -m 755 "$here/bin/proxywall" "$here/bin/proxywall-gui" "$pkg/usr/bin/"

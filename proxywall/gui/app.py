@@ -18,7 +18,7 @@ gi.require_version("Gdk", "3.0")
 gi.require_version("GdkPixbuf", "2.0")
 from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk, Pango  # noqa: E402
 
-from .. import APP_ID, APP_NAME, __version__, config, geo  # noqa: E402
+from .. import APP_ID, APP_NAME, __version__, config, geo, links  # noqa: E402
 from ..geodata import COUNTRIES, LAND  # noqa: E402
 from ..cli import human_bytes  # noqa: E402
 from ..client import Client, DaemonUnavailable  # noqa: E402
@@ -499,12 +499,27 @@ class Panel:
         segment.get_style_context().add_class("pw-seg")
         self.type_socks = Gtk.RadioButton.new_with_label(None, "SOCKS5")
         self.type_http = Gtk.RadioButton.new_with_label_from_widget(self.type_socks, "HTTP")
-        for button in (self.type_socks, self.type_http):
+        self.type_ssh = Gtk.RadioButton.new_with_label_from_widget(self.type_socks, "SSH")
+        self.type_link = Gtk.RadioButton.new_with_label_from_widget(self.type_socks, "LINK")
+        self.type_link.set_tooltip_text("VLESS, VMess, Trojan or Shadowsocks: paste the share link")
+        for button in (self.type_socks, self.type_http, self.type_ssh, self.type_link):
             button.set_mode(False)
+            button.connect("toggled", self._on_type_changed)
             segment.pack_start(button, True, True, 0)
         page.pack_start(segment, False, False, 0)
 
+        # Share link (VLESS, VMess, Trojan, Shadowsocks): one box instead of the form.
+        self.link = Gtk.Entry(placeholder_text="vless://  vmess://  trojan://  ss://")
+        self.link.set_input_purpose(Gtk.InputPurpose.URL)
+        self.link.set_no_show_all(True)
+        self.link.connect("changed", self._on_link_changed)
+        page.pack_start(self.link, False, False, 0)
+        self.link_hint = _label("", "pw-key", wrap=True)
+        self.link_hint.set_no_show_all(True)
+        page.pack_start(self.link_hint, False, False, 0)
+
         address = Gtk.Box(spacing=8)
+        self.address_row = address
         self.host = Gtk.Entry(placeholder_text="Address, e.g. 192.168.1.5")
         self.host.set_input_purpose(Gtk.InputPurpose.URL)
         self.host.connect("focus-out-event", self._split_host)
@@ -524,6 +539,26 @@ class Panel:
         self.password.connect("icon-press", lambda entry, *_: entry.set_visibility(not entry.get_visibility()))
         self.password.connect("changed", self._on_password_changed)
         page.pack_start(self.password, False, False, 0)
+
+        # SSH only: a private key instead of (or next to) the password.
+        self.key_row = Gtk.Box(spacing=8)
+        self.key_row.set_no_show_all(True)
+        self.key_button = Gtk.Button()
+        self.key_button.get_style_context().add_class("pw-rowbutton")
+        self.key_label = _label("", "pw-key")
+        self.key_label.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+        self.key_button.add(self.key_label)
+        self.key_button.connect("clicked", self._choose_key)
+        self.key_row.pack_start(self.key_button, True, True, 0)
+        self.key_clear = Gtk.Button.new_from_icon_name("edit-clear-symbolic", Gtk.IconSize.MENU)
+        self.key_clear.get_style_context().add_class("pw-rowbutton")
+        self.key_clear.set_tooltip_text("Do not use a private key")
+        self.key_clear.connect("clicked", lambda *_: self._set_key(""))
+        self.key_row.pack_start(self.key_clear, False, False, 0)
+        page.pack_start(self.key_row, False, False, 0)
+        self._key = None         # None: keep what the service has; "": none; text: a new key
+        self._key_saved = False
+        self._link_saved = ""    # description of the link the service has, if any
 
         section("BYPASS THE PROXY")
         frame = Gtk.Box()
@@ -880,10 +915,17 @@ class Panel:
             return False
         self._loading = True
         proxy = cfg["proxy"]
-        (self.type_http if proxy["type"] == "http" else self.type_socks).set_active(True)
-        self.host.set_text(proxy["host"])
-        self.port.set_text(str(proxy["port"]))
+        by_link = proxy["type"] in links.ENGINE_KINDS
+        self._type_button("link" if by_link else proxy["type"]).set_active(True)
+        self.host.set_text("" if by_link else proxy["host"])
+        self.port.set_text("" if by_link else str(proxy["port"]))
         self.username.set_text(proxy["username"])
+        self.link.set_text("")
+        self._link_saved = ""
+        if by_link and proxy.get("link_set"):
+            self._link_saved = " · ".join(part for part in (
+                proxy["type"].upper(), f"{proxy['host']}:{proxy['port']}", proxy.get("name")) if part)
+        self._key, self._key_saved = None, bool(proxy.get("key_set"))
         self.password.set_text("")
         self.password.set_visibility(False)
         self.password.set_placeholder_text(
@@ -898,9 +940,89 @@ class Panel:
         self._show_blocked()
         self.allow_lan.set_active(cfg["allow_lan"])
         self.autostart.set_active(os.path.exists(AUTOSTART_FILE))
+        self._on_type_changed()
         self._loading = False
         self.save.set_sensitive(True)
         return False
+
+    # ------------------------------------------------------------ kinds of server
+    def _type_button(self, kind):
+        return {"http": self.type_http, "ssh": self.type_ssh, "link": self.type_link}.get(kind, self.type_socks)
+
+    def _proxy_type(self):
+        for kind in ("http", "ssh", "link"):
+            if self._type_button(kind).get_active():
+                return kind
+        return "socks5"
+
+    def _on_type_changed(self, button=None):
+        """Show the fields that belong to the chosen kind of server."""
+        if button is not None and not button.get_active():
+            return  # the radio button that was just switched off
+        kind = self._proxy_type()
+        by_link, ssh = kind == "link", kind == "ssh"
+        self.link.set_visible(by_link)
+        self.link_hint.set_visible(by_link)
+        for widget in (self.address_row, self.username, self.password):
+            widget.set_visible(not by_link)
+        self.key_row.set_visible(ssh)
+        self.username.set_placeholder_text("Username" if ssh else "Username (optional)")
+        if not self._loading:  # a sensible port for the kind that was just chosen
+            default = {"socks5": "1080", "http": "8080", "ssh": "22"}.get(kind)
+            if default and self.port.get_text().strip() in ("", "1080", "8080", "22"):
+                self.port.set_text(default)
+        self._on_link_changed()
+        self._show_key()
+
+    def _on_link_changed(self, *_args):
+        text = self.link.get_text().strip()
+        self.link.set_placeholder_text("Link saved — paste a new one to replace it" if self._link_saved
+                                       else "vless://  vmess://  trojan://  ss://")
+        if not text:
+            self.link_hint.set_text(self._link_saved or "Paste the link you were given for your server.")
+            return
+        try:
+            server = links.parse(text)
+        except links.LinkError as exc:
+            message = str(exc)
+            self.link_hint.set_text(message[:1].upper() + message[1:])
+            return
+        self.link_hint.set_text(" · ".join(part for part in (
+            server["kind"].upper(), f"{server['host']}:{server['port']}",
+            server["network"].upper() if server["network"] != "raw" else "",
+            server["security"].upper() if server["security"] != "none" else "", server["name"]) if part))
+
+    def _show_key(self):
+        if self._key:
+            text = "Private key chosen"
+        elif self._key is None and self._key_saved:
+            text = "Private key saved — click to replace"
+        else:
+            text = "Private key file (optional)…"
+        self.key_label.set_text(text)
+        self.key_clear.set_visible(bool(self._key) or (self._key is None and self._key_saved))
+
+    def _set_key(self, text):
+        self._key = text
+        self._show_key()
+
+    def _choose_key(self, _button):
+        dialog = Gtk.FileChooserNative.new("Private key", self.stack.get_toplevel(),
+                                           Gtk.FileChooserAction.OPEN, "Use this key", "Cancel")
+        ssh_dir = os.path.expanduser("~/.ssh")
+        if os.path.isdir(ssh_dir):
+            dialog.set_current_folder(ssh_dir)
+        if dialog.run() == Gtk.ResponseType.ACCEPT:
+            try:
+                with open(dialog.get_filename(), encoding="utf-8") as handle:
+                    text = handle.read(20001)
+                if "PRIVATE KEY-----" not in text or len(text) > 20000:
+                    raise ValueError("that file is not a private key")
+                self._set_key(text)
+                self._settings_message([])
+            except (OSError, ValueError) as exc:
+                self._settings_message([f"Could not use that file: {exc}"])
+        dialog.destroy()
 
     def _on_password_changed(self, _entry):
         if not self._loading:
@@ -912,6 +1034,11 @@ class Panel:
         text = self.host.get_text().strip()
         if self._loading or not text:
             return False
+        if links.is_engine_link(text):  # a share link pasted into the address box
+            self.host.set_text("")
+            self.type_link.set_active(True)
+            self.link.set_text(text)
+            return False
         has_scheme, has_user = "://" in text, "@" in text
         plain_port = text.count(":") == 1 and text.rsplit(":", 1)[1].isdigit()
         if not (has_scheme or has_user or plain_port):
@@ -922,7 +1049,7 @@ class Panel:
             return False
         self._loading = True
         if has_scheme:
-            (self.type_http if proxy["type"] == "http" else self.type_socks).set_active(True)
+            self._type_button(proxy["type"]).set_active(True)
         if has_scheme or plain_port or ":" in text.rsplit("@", 1)[-1]:
             self.port.set_text(str(proxy["port"]))
         if proxy["username"]:
@@ -946,14 +1073,22 @@ class Panel:
         if not username:
             password = ""
         port = self.port.get_text().strip()
-        patch = {
-            "proxy": {
-                "type": "http" if self.type_http.get_active() else "socks5",
+        kind = self._proxy_type()
+        if kind == "link":
+            # Nothing typed means "keep the link the service already has".
+            proxy = {"type": "link", "link": self.link.get_text().strip() or None}
+        else:
+            proxy = {
+                "type": kind,
                 "host": self.host.get_text().strip(),
-                "port": int(port) if port.isdigit() else (port or 1080),
+                "port": int(port) if port.isdigit() else (port or {"http": 8080, "ssh": 22}.get(kind, 1080)),
                 "username": username,
                 "password": password,
-            },
+            }
+            if kind == "ssh":
+                proxy["private_key"] = self._key
+        patch = {
+            "proxy": proxy,
             "exclude": [line.strip() for line in text.replace(",", "\n").splitlines() if line.strip()],
             "allow_lan": self.allow_lan.get_active(),
         }

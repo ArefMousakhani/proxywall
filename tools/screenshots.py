@@ -44,7 +44,12 @@ class NoWorker:
         pass
 
 
-def shoot(name, out_dir, settings=False, status=None, countries=False):
+LINK_CONFIG = {"proxy": {"type": "vless", "host": "example.com", "port": 443, "username": "", "password_set": False,
+                         "key_set": False, "link_set": True, "name": "Frankfurt"},
+               "exclude": ["*.ir"], "allow_lan": True, "blocked_countries": ["IR"]}
+
+
+def shoot(name, out_dir, settings=False, status=None, countries=False, config=None):
     panel = gui.Panel(NoWorker())
     window = Gtk.OffscreenWindow()
     window.get_style_context().add_class("pw-root")
@@ -65,7 +70,7 @@ def shoot(name, out_dir, settings=False, status=None, countries=False):
             panel.power._angle = 4.0
     if settings:
         panel.show_settings()
-        panel._fill_settings(CONFIG, None)
+        panel._fill_settings(config or CONFIG, None)
     if countries:
         panel.show_countries()
 
@@ -116,6 +121,7 @@ def main():
         shoot(name, out_dir, status=status)
     shoot("settings", out_dir, settings=True, status=SCENES["connected"])
     shoot("countries", out_dir, settings=True, countries=True, status=SCENES["connected"])
+    shoot("settings-link", out_dir, settings=True, status=SCENES["connected"], config=LINK_CONFIG)
     shoot("stopped", out_dir)
     tray_strip(out_dir)
 

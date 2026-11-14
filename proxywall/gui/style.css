@@ -204,8 +204,9 @@ button.pw-rowbutton:disabled { opacity: 0.5; }
     font-size: 12.5px;
 }
 
-.pw-seg button:first-child { border-radius: 10px 0 0 10px; }
-.pw-seg button:last-child { border-radius: 0 10px 10px 0; border-left-width: 0; }
+.pw-seg button { border-radius: 0; border-left-width: 0; }
+.pw-seg button:first-child { border-radius: 10px 0 0 10px; border-left-width: 1px; }
+.pw-seg button:last-child { border-radius: 0 10px 10px 0; }
 
 .pw-seg button:checked {
     background-color: #2f7bff;

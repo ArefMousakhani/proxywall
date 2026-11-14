@@ -1,6 +1,7 @@
 """Fast unit tests: no network namespaces, no privileges."""
 
 import asyncio
+import base64
 import ipaddress
 import json
 import os
@@ -12,7 +13,7 @@ import subprocess
 import tempfile
 import unittest
 
-from proxywall import config, dnsmsg, firewall, geo, monitor, upstream
+from proxywall import config, dnsmsg, firewall, geo, links, monitor, upstream
 from proxywall.fakeip import FakeIPPool
 from proxywall.geodata import COUNTRIES, LAND
 from proxywall.monitor import parse_ip_reply
@@ -97,7 +98,8 @@ class ConfigTest(unittest.TestCase):
 
     def test_proxy_url(self):
         self.assertEqual(config.parse_proxy_url("socks5://u:p%40ss@192.168.1.5:1080"),
-                         {"type": "socks5", "host": "192.168.1.5", "port": 1080, "username": "u", "password": "p@ss"})
+                         {"type": "socks5", "host": "192.168.1.5", "port": 1080, "username": "u", "password": "p@ss",
+                          "link": ""})
         self.assertEqual(config.parse_proxy_url("http://proxy.lan")["port"], 8080)
         self.assertEqual(config.parse_proxy_url("10.0.0.1:1081")["type"], "socks5")
         self.assertEqual(config.parse_proxy_url("socks5://[fd00::1]:1080")["host"], "fd00::1")
@@ -116,6 +118,138 @@ class ConfigTest(unittest.TestCase):
             with self.assertRaises(config.ConfigError):
                 config.load(path)
             self.assertEqual(config.load(os.path.join(tmp, "missing.json")), config.defaults())
+
+
+class LinkTest(unittest.TestCase):
+    ID = "b831381d-6324-4d53-ad4f-8cda48b30811"
+
+    def outbound(self, link, address="203.0.113.9", mark=0x5057):
+        return links.xray_outbound(links.parse(link), address, mark)
+
+    def test_vless_reality(self):
+        out = self.outbound(f"vless://{self.ID}@Example.COM:443?security=reality&sni=www.microsoft.com&fp=chrome"
+                            "&pbk=PUBKEY&sid=6ba8&flow=xtls-rprx-vision&type=tcp#My%20server")
+        self.assertEqual(out["protocol"], "vless")
+        self.assertEqual(out["settings"]["vnext"][0], {
+            "address": "203.0.113.9", "port": 443,
+            "users": [{"id": self.ID, "encryption": "none", "flow": "xtls-rprx-vision"}]})
+        stream = out["streamSettings"]
+        self.assertEqual((stream["network"], stream["security"], stream["sockopt"]), ("raw", "reality", {"mark": 0x5057}))
+        self.assertEqual(stream["realitySettings"]["publicKey"], "PUBKEY")
+        self.assertEqual(links.parse(f"vless://{self.ID}@h.example:1#My%20server")["name"], "My server")
+
+    def test_the_real_name_survives_dialling_by_address(self):
+        """Xray is given an IP, so SNI and Host must carry the name explicitly."""
+        stream = self.outbound(f"vless://{self.ID}@cdn.example.com:443?security=tls&type=ws&path=%2Fp")["streamSettings"]
+        self.assertEqual(stream["tlsSettings"]["serverName"], "cdn.example.com")
+        self.assertEqual(stream["wsSettings"], {"path": "/p", "host": "cdn.example.com"})
+        explicit = self.outbound(f"vless://{self.ID}@cdn.example.com:443?security=tls&sni=a.example&host=b.example"
+                                 "&type=httpupgrade")["streamSettings"]
+        self.assertEqual(explicit["tlsSettings"]["serverName"], "a.example")
+        self.assertEqual(explicit["httpupgradeSettings"]["host"], "b.example")
+        by_ip = self.outbound(f"trojan://pw@198.51.100.7:443")["streamSettings"]
+        self.assertNotIn("serverName", by_ip["tlsSettings"])
+
+    def test_vmess(self):
+        body = {"v": "2", "ps": "name", "add": "example.com", "port": "443", "id": self.ID, "aid": "0", "scy": "auto",
+                "net": "ws", "type": "none", "host": "h.example.com", "path": "/p", "tls": "tls"}
+        out = self.outbound("vmess://" + base64.b64encode(json.dumps(body).encode()).decode())
+        self.assertEqual(out["settings"]["vnext"][0]["users"], [{"id": self.ID, "alterId": 0, "security": "auto"}])
+        self.assertEqual(out["streamSettings"]["wsSettings"], {"path": "/p", "host": "h.example.com"})
+        body.update(net="grpc", path="svc", type="multi")
+        grpc = self.outbound("vmess://" + base64.b64encode(json.dumps(body).encode()).decode())["streamSettings"]
+        self.assertEqual(grpc["grpcSettings"], {"serviceName": "svc", "multiMode": True})
+
+    def test_shadowsocks_forms(self):
+        want = {"address": "203.0.113.9", "port": 8388, "method": "aes-256-gcm", "password": "se:cret"}
+        sip002 = "ss://" + base64.urlsafe_b64encode(b"aes-256-gcm:se:cret").decode().rstrip("=") + "@example.com:8388#n"
+        legacy = "ss://" + base64.b64encode(b"aes-256-gcm:se:cret@example.com:8388").decode() + "#n"
+        plain = "ss://aes-256-gcm:se%3Acret@example.com:8388/?#n"
+        for link in (sip002, legacy, plain):
+            self.assertEqual(self.outbound(link)["settings"]["servers"], [want], link)
+        with self.assertRaises(links.LinkError):
+            links.parse(sip002.replace("#n", "?plugin=obfs-local#n"))
+
+    def test_trojan_defaults_to_tls(self):
+        out = self.outbound("trojan://p%40ss@example.com?type=grpc&serviceName=s")
+        self.assertEqual(out["settings"]["servers"][0], {"address": "203.0.113.9", "port": 443, "password": "p@ss"})
+        self.assertEqual(out["streamSettings"]["security"], "tls")
+
+    def test_bad_links_have_readable_errors(self):
+        cases = {"hysteria2://x@h:1": "Hysteria2", "tuic://a:b@h:1": "TUIC", "wireguard://k@h:1": "WireGuard",
+                 "vmess://!!!": "damaged", "": "paste", "ftp://h": "unknown kind",
+                 f"vless://{self.ID}@h.example:443?security=reality": "public key",
+                 f"vless://{self.ID}@h.example:443?type=h2": "no longer supported",
+                 f"vless://{self.ID}@h.example:99999": "valid", f"vless://{self.ID}@:443": "no server address",
+                 "vless://" + "x" * 40 + "@h.example:443": "UUID", "trojan://@h.example:443": "no password",
+                 "ss://" + base64.b64encode(b"rc4-md5:x@h.example:1").decode(): "not supported",
+                 "vless://" + "a" * 9000: "too long"}
+        for link, needle in cases.items():
+            with self.assertRaises(links.LinkError, msg=link) as caught:
+                links.parse(link)
+            self.assertIn(needle, str(caught.exception), link)
+        for junk in (os.urandom(64).hex(), "vless://", "vmess://e30=", "ss://@", "trojan://a@[::1"):
+            with self.assertRaises(links.LinkError, msg=junk):
+                links.parse(junk)
+
+    def test_local_port_is_private(self):
+        cfg = links.xray_config(links.parse(f"vless://{self.ID}@h.example:443"), "203.0.113.9", 47210, "u", "p", 7)
+        inbound = cfg["inbounds"][0]
+        self.assertEqual((inbound["listen"], inbound["port"]), ("127.0.0.1", 47210))
+        self.assertEqual(inbound["settings"], {"auth": "password", "accounts": [{"user": "u", "pass": "p"}], "udp": False})
+        self.assertEqual(len(cfg["outbounds"]), 1)
+
+
+class ServerConfigTest(unittest.TestCase):
+    LINK = f"vless://{LinkTest.ID}@example.com:8443?security=tls&type=ws#Frankfurt"
+    KEY = "-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\n-----END OPENSSH PRIVATE KEY-----"
+
+    def test_a_link_defines_the_server(self):
+        cfg = config.validate({"proxy": config.parse_proxy_url(self.LINK)})
+        proxy = cfg["proxy"]
+        self.assertEqual((proxy["type"], proxy["host"], proxy["port"]), ("vless", "example.com", 8443))
+        self.assertEqual(config.proxy_label(cfg), "vless://example.com:8443")
+        same = config.validate(config.merge(cfg, {"proxy": {"type": "link", "link": None}}))   # "keep the link"
+        self.assertEqual(same["proxy"], proxy)
+        with self.assertRaises(config.ConfigError):
+            config.validate({"proxy": {"type": "link", "link": ""}})
+        with self.assertRaises(config.ConfigError):
+            config.validate({"proxy": {"type": "vless", "link": "hysteria2://x@h:1"}})
+
+    def test_secrets_never_leave(self):
+        cfg = config.validate({"proxy": config.parse_proxy_url(self.LINK)})
+        view = config.public_view(cfg)["proxy"]
+        self.assertNotIn(LinkTest.ID, json.dumps(view))
+        self.assertEqual((view["link_set"], view["name"], view["key_set"]), (True, "Frankfurt", False))
+        ssh = config.validate({"proxy": {"type": "ssh", "host": "h.example", "port": 22, "username": "me",
+                                         "password": "pw", "private_key": self.KEY}})
+        view = config.public_view(ssh)["proxy"]
+        self.assertNotIn("AAAA", json.dumps(view))
+        self.assertEqual((view["key_set"], view["password_set"]), (True, True))
+
+    def test_switching_kind_drops_what_no_longer_applies(self):
+        cfg = config.validate({"proxy": config.parse_proxy_url(self.LINK)})
+        socks = config.validate(config.merge(cfg, {"proxy": {"type": "socks5", "host": "10.0.0.1", "port": 1080}}))
+        self.assertEqual((socks["proxy"]["link"], socks["proxy"]["private_key"]), ("", ""))
+
+    def test_ssh_needs_a_user_and_a_secret(self):
+        base = {"type": "ssh", "host": "h.example", "port": 22}
+        for extra in ({"username": "", "password": "x"}, {"username": "me"},
+                      {"username": "me", "private_key": "not a key"}):
+            with self.assertRaises(config.ConfigError, msg=extra):
+                config.validate({"proxy": dict(base, **extra)})
+        ok = config.validate({"proxy": dict(base, username="me", private_key=self.KEY)})
+        self.assertEqual(config.proxy_label(ok), "ssh://h.example:22")
+        self.assertEqual(config.parse_proxy_url("ssh://me:pw@h.example")["port"], 22)
+
+    def test_engine_port(self):
+        with self.assertRaises(config.ConfigError):
+            config.validate({"engine_port": 47201})
+        with self.assertRaises(config.ConfigError):
+            config.validate({"engine_path": "xray"})
+        rules = firewall.render(47201, 47253, 0x5057, [], [], engine_port=47210)
+        self.assertIn("tcp dport 47210 meta mark != 0x5057 reject with tcp reset", rules)
+        self.assertLess(rules.index("tcp dport 47210"), rules.index('iifname "lo" accept'))
 
 
 class CountryConfigTest(unittest.TestCase):

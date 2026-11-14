@@ -92,7 +92,20 @@ def cmd_disconnect(client, _args):
 
 
 def cmd_set_proxy(client, args):
-    client.set_config({"proxy": config.parse_proxy_url(args.url)})
+    proxy = config.parse_proxy_url(args.url)
+    if args.key:
+        if proxy["type"] != "ssh":
+            print("--key is only for ssh:// servers", file=sys.stderr)
+            return 2
+        try:
+            with open(os.path.expanduser(args.key), encoding="utf-8") as handle:
+                proxy["private_key"] = handle.read()
+        except (OSError, UnicodeDecodeError) as exc:
+            print(f"cannot read {args.key}: {exc}", file=sys.stderr)
+            return 2
+    elif proxy["type"] == "ssh":
+        proxy["private_key"] = ""
+    client.set_config({"proxy": proxy})
     print(f"Proxy set to {client.status()['proxy']}")
     return 0
 
@@ -229,8 +242,10 @@ def build_parser():
     p = sub.add_parser("disconnect", help="stop using the proxy")
     p.set_defaults(func=cmd_disconnect)
 
-    p = sub.add_parser("set-proxy", help="set the proxy, e.g. socks5://user:pass@192.168.1.5:1080")
+    p = sub.add_parser("set-proxy", help="set the server: socks5://, http://, ssh://user:pass@host, "
+                                         "or a vless://, vmess://, trojan://, ss:// link")
     p.add_argument("url", metavar="URL")
+    p.add_argument("--key", metavar="FILE", help="private key for an ssh:// server")
     p.set_defaults(func=cmd_set_proxy)
 
     p = sub.add_parser("kill-switch", help="block all traffic whenever the proxy is not connected")

@@ -54,6 +54,20 @@ curl -v --proxy http://192.168.1.5:8080 https://example.com        # HTTP
 
 (While ProxyWall is connected this test itself travels through the proxy when the proxy is not on your local network, so disconnect first.)
 
+## A share link or SSH server does not connect
+
+The reason is shown under the status and in `proxywall logs`.
+
+| Message | Meaning |
+| --- | --- |
+| `needs Xray, which is not installed` | install Xray, or point `engine_path` at it (README, *Other protocols*) |
+| `... links are not supported` | Hysteria, TUIC, WireGuard and NaiveProxy need a different program; run that client yourself and give ProxyWall its SOCKS5 port |
+| `no answer through the server` | the helper runs but nothing comes back: wrong id/password in the link, the server is down, or it blocks DNS to `remote_dns` (try `proxywall config remote_dns=8.8.8.8`) |
+| `the server rejected the username, password or key` | SSH login failed |
+| `the server's host key has changed` | the SSH server is not the one seen the first time; if that is expected, `sudo rm /var/lib/proxywall/known_hosts` |
+
+`proxywall config log_level=debug` adds the helper's own output to `proxywall logs`.
+
 ## COUNTRY BLOCKED
 
 The proxy comes out in a country on your list (*Settings → Blocked countries*); the address and country are shown in the window and by `proxywall status`. Nothing is sent through the proxy until its exit moves. ProxyWall checks again every few seconds, so there is nothing to click once the proxy is fixed.

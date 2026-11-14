@@ -4,7 +4,7 @@ DEV_DIR ?= $(CURDIR)/.dev
 .PHONY: test integration deb run-dev screenshots clean
 
 test:
-	$(PYTHON) -m unittest tests.test_units tests.test_daemon
+	$(PYTHON) -m unittest tests.test_units tests.test_daemon tests.test_engine
 
 integration:
 	tests/integration/run.sh

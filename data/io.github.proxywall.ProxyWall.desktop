@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=ProxyWall
+GenericName=Proxy Client
+Comment=Send all traffic through a SOCKS5 or HTTP proxy, with a kill switch
+Exec=proxywall-gui
+Icon=proxywall
+Terminal=false
+Categories=Network;
+Keywords=proxy;socks;socks5;http;vpn;firewall;killswitch;
+StartupNotify=true
+StartupWMClass=proxywall-gui

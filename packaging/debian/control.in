@@ -1,0 +1,20 @@
+Package: proxywall
+Version: @VERSION@
+Architecture: all
+Maintainer: @MAINTAINER@
+Installed-Size: @SIZE@
+Depends: python3 (>= 3.10), python3-gi, python3-gi-cairo, gir1.2-gtk-3.0, nftables, systemd, init-system-helpers
+Recommends: gir1.2-xapp-1.0 | gir1.2-ayatanaappindicator3-0.1, ca-certificates
+Section: net
+Priority: optional
+Homepage: @HOMEPAGE@
+Description: system-wide SOCKS5/HTTP proxy client with a kill switch
+ ProxyWall sends all traffic of this computer through a SOCKS5 or HTTP
+ proxy, the way a VPN client would, and keeps a firewall closed around it:
+ when the proxy cannot be reached, traffic is blocked instead of going out
+ directly.
+ .
+ It comes with a small desktop interface, a command line tool, an exclusion
+ list for domains and addresses that should bypass the proxy (for example
+ *.ir or 10.0.0.0/8), DNS leak protection and an always-on mode that also
+ blocks traffic after a reboot until the proxy is connected.

@@ -1,0 +1,25 @@
+#!/bin/sh
+set -e
+
+if [ "$1" = "configure" ] || [ "$1" = "abort-upgrade" ] || [ "$1" = "abort-deconfigure" ] || [ "$1" = "abort-remove" ]; then
+    python3 -m compileall -q /usr/lib/proxywall >/dev/null 2>&1 || true
+
+    deb-systemd-helper unmask proxywall.service >/dev/null || true
+    if deb-systemd-helper --quiet was-enabled proxywall.service; then
+        deb-systemd-helper enable proxywall.service >/dev/null || true
+    else
+        deb-systemd-helper update-state proxywall.service >/dev/null || true
+    fi
+
+    if [ -d /run/systemd/system ]; then
+        systemctl --system daemon-reload >/dev/null || true
+        if [ -n "$2" ]; then
+            # Upgrade: the firewall stays in place while the service restarts.
+            deb-systemd-invoke restart proxywall.service >/dev/null || true
+        else
+            deb-systemd-invoke start proxywall.service >/dev/null || true
+        fi
+    fi
+fi
+
+exit 0

@@ -1,0 +1,229 @@
+/* ProxyWall - one dark, calm surface. Colours:
+   background #0e1526, text #e8edf7, muted #8f9bb3,
+   on #2fd47f, waiting #f6b73c, blocked #ff6b6b, action #2f7bff */
+
+.pw-root,
+.pw-root headerbar,
+.pw-root scrolledwindow,
+.pw-root viewport {
+    background-color: #0e1526;
+    background-image: none;
+    color: #e8edf7;
+}
+
+.pw-root headerbar {
+    border: none;
+    box-shadow: none;
+    min-height: 46px;
+    padding: 0 6px;
+}
+
+.pw-root headerbar button {
+    background: none;
+    border: none;
+    box-shadow: none;
+    color: #aab6cc;
+    min-width: 34px;
+    min-height: 34px;
+    border-radius: 999px;
+    -gtk-icon-shadow: none;
+}
+
+.pw-root headerbar button:hover {
+    background-color: rgba(255, 255, 255, 0.08);
+    color: #ffffff;
+}
+
+.pw-title {
+    font-weight: 800;
+    font-size: 13px;
+    letter-spacing: 2px;
+    color: #c9d3e6;
+}
+
+.pw-power {
+    background: none;
+    border: none;
+    box-shadow: none;
+    padding: 0;
+    border-radius: 999px;
+}
+
+.pw-power:focus {
+    outline: 2px solid rgba(255, 255, 255, 0.25);
+    outline-offset: -10px;
+}
+
+.pw-state {
+    font-size: 20px;
+    font-weight: 800;
+    letter-spacing: 3px;
+}
+
+.pw-state.on { color: #2fd47f; }
+.pw-state.wait { color: #f6b73c; }
+.pw-state.bad { color: #ff6b6b; }
+.pw-state.off { color: #9aa6bd; }
+
+.pw-sub {
+    color: #8f9bb3;
+    font-size: 13px;
+}
+
+.pw-error {
+    color: #ff8f8f;
+    font-size: 12px;
+}
+
+.pw-card {
+    background-color: rgba(255, 255, 255, 0.045);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 14px;
+    padding: 12px 16px;
+}
+
+.pw-key {
+    color: #8f9bb3;
+    font-size: 12.5px;
+}
+
+.pw-value {
+    color: #e8edf7;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.pw-row-title {
+    font-size: 14px;
+    font-weight: 700;
+    color: #e8edf7;
+}
+
+.pw-footer {
+    color: #6f7c96;
+    font-size: 12px;
+}
+
+.pw-section {
+    color: #6f7c96;
+    font-size: 11px;
+    font-weight: 800;
+    letter-spacing: 1.5px;
+}
+
+.pw-root entry {
+    background-color: rgba(255, 255, 255, 0.06);
+    background-image: none;
+    color: #e8edf7;
+    caret-color: #ffffff;
+    border: 1px solid rgba(255, 255, 255, 0.10);
+    border-radius: 10px;
+    box-shadow: none;
+    min-height: 38px;
+    padding: 0 12px;
+}
+
+.pw-root entry:focus {
+    border-color: #2f7bff;
+}
+
+.pw-root entry image {
+    color: #8f9bb3;
+}
+
+.pw-textframe {
+    background-color: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.10);
+    border-radius: 10px;
+    padding: 8px 10px;
+}
+
+.pw-textframe scrolledwindow,
+.pw-textframe viewport,
+.pw-textframe textview,
+.pw-textframe textview text {
+    background-color: transparent;
+    color: #e8edf7;
+    caret-color: #ffffff;
+}
+
+.pw-root selection,
+.pw-root entry selection,
+.pw-root textview text selection {
+    background-color: #2f7bff;
+    color: #ffffff;
+}
+
+.pw-seg button {
+    background-color: rgba(255, 255, 255, 0.06);
+    background-image: none;
+    color: #aab6cc;
+    border: 1px solid rgba(255, 255, 255, 0.10);
+    box-shadow: none;
+    text-shadow: none;
+    min-height: 36px;
+    font-weight: 700;
+    font-size: 12.5px;
+}
+
+.pw-seg button:first-child { border-radius: 10px 0 0 10px; }
+.pw-seg button:last-child { border-radius: 0 10px 10px 0; border-left-width: 0; }
+
+.pw-seg button:checked {
+    background-color: #2f7bff;
+    border-color: #2f7bff;
+    color: #ffffff;
+}
+
+button.pw-primary {
+    background-color: #2f7bff;
+    background-image: none;
+    color: #ffffff;
+    border: none;
+    border-radius: 10px;
+    box-shadow: none;
+    text-shadow: none;
+    min-height: 42px;
+    font-weight: 700;
+}
+
+button.pw-primary:hover { background-color: #4a8cff; }
+button.pw-primary:disabled { background-color: rgba(255, 255, 255, 0.10); color: #6f7c96; }
+
+.pw-root switch {
+    background-color: rgba(255, 255, 255, 0.16);
+    background-image: none;
+    border: none;
+    border-radius: 999px;
+    box-shadow: none;
+    min-width: 46px;
+    min-height: 26px;
+    font-size: 0;
+    color: transparent;
+}
+
+.pw-root switch:checked { background-color: #2fd47f; }
+.pw-root switch:disabled { opacity: 0.45; }
+
+.pw-root switch slider {
+    background-color: #ffffff;
+    background-image: none;
+    border: none;
+    border-radius: 999px;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.45);
+    min-width: 22px;
+    min-height: 22px;
+    margin: 2px;
+}
+
+.pw-root switch image { color: transparent; -gtk-icon-source: none; }
+
+.pw-root scrollbar { background-color: transparent; border: none; }
+.pw-root scrollbar slider { background-color: rgba(255, 255, 255, 0.22); min-width: 4px; min-height: 4px; border-radius: 999px; }
+
+.pw-root scrolledwindow undershoot,
+.pw-root scrolledwindow overshoot {
+    background: none;
+    border: none;
+    box-shadow: none;
+}

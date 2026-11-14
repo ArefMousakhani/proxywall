@@ -1,0 +1,55 @@
+[Unit]
+Description=ProxyWall - system-wide proxy client with a kill switch
+Documentation=https://github.com/ArefMousakhani/proxywall file:///usr/share/doc/proxywall/README.md
+# Come up before any network interface is configured, so that an enabled
+# kill switch is already in force when the machine first gets a link.
+Before=network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+# Restore the saved firewall first: even if the daemon then fails to start,
+# the machine stays closed instead of going online without the proxy.
+ExecStartPre=-/bin/sh -c 'test -s /var/lib/proxywall/boot.nft && exec /usr/sbin/nft -f /var/lib/proxywall/boot.nft'
+ExecStart=/usr/lib/proxywall/proxywalld
+Restart=always
+RestartSec=1
+TimeoutStartSec=30
+TimeoutStopSec=10
+LimitNOFILE=65536
+
+StateDirectory=proxywall
+StateDirectoryMode=0700
+RuntimeDirectory=proxywall
+RuntimeDirectoryMode=0755
+UMask=0077
+
+# The daemon needs exactly one privilege: managing its firewall table and
+# marking its own sockets (CAP_NET_ADMIN). Everything else is taken away.
+CapabilityBoundingSet=CAP_NET_ADMIN
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+DevicePolicy=closed
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

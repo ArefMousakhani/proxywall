@@ -14,6 +14,8 @@ from .rules import normalize_list
 NATIVE_TYPES = ("socks5", "http")                       # spoken by ProxyWall itself
 ENGINE_TYPES = links.ENGINE_KINDS + ("ssh",)            # need a helper process (Xray, ssh)
 PROXY_TYPES = NATIVE_TYPES + ENGINE_TYPES
+MAX_SERVERS = 200
+ENGINE_PORTS = 10    # engine_port .. engine_port+9: one for the tunnel in use, the rest for tests
 LOG_LEVELS = ("debug", "info", "warning", "error")
 _HOST_RE = re.compile(r"^(?=.{1,253}$)([a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9_])?)(\.[a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9_])?)*$")
 
@@ -22,6 +24,12 @@ DEFAULTS = {
     # are described by `link` (a share link); host and port are then taken from it.
     "proxy": {"type": "socks5", "host": "", "port": 1080, "username": "", "password": "",
               "link": "", "private_key": ""},
+    # Saved servers: [{"id", "name", "proxy": {...as above...}}]. `proxy` is always a
+    # copy of the one named by `active_server` (empty = none chosen).
+    "servers": [],
+    "active_server": "",
+    # Fetched through a server to see whether it reaches the outside world.
+    "test_url": "https://www.google.com/generate_204",
     # Block all traffic whenever the proxy is not connected (also after reboot).
     "kill_switch": False,
     # Let private/local networks bypass the proxy.
@@ -98,7 +106,7 @@ def parse_proxy_url(url):
     }
 
 
-def merge(base, patch):
+def merge(base, patch, known=None):
     """Return *base* updated with *patch*. Unknown keys raise ConfigError.
 
     ``proxy.password = None`` means "keep the stored password", so clients never
@@ -109,7 +117,7 @@ def merge(base, patch):
     out = copy.deepcopy(base)
     errors = []
     for key, value in patch.items():
-        if key not in DEFAULTS:
+        if key not in (known or DEFAULTS):
             errors.append(f"unknown setting '{key}'")
         elif key == "proxy":
             if not isinstance(value, dict):
@@ -126,6 +134,17 @@ def merge(base, patch):
             out[key] = value
     if errors:
         raise ConfigError(errors)
+    if "proxy" in patch and known is None and "servers" not in patch and isinstance(out.get("servers"), list):
+        # Setting `proxy` directly (`proxywall set-proxy`, older clients) edits the
+        # server in use, or becomes the first one.
+        server = next((item for item in out["servers"]
+                       if isinstance(item, dict) and item.get("id") == out.get("active_server")), None)
+        if server is not None:
+            server["proxy"] = copy.deepcopy(out["proxy"])
+        elif not out.get("active_server") and (out["proxy"].get("host") or out["proxy"].get("link")):
+            new_id = _next_server_id(out["servers"])
+            out["servers"].append({"id": new_id, "name": "", "proxy": copy.deepcopy(out["proxy"])})
+            out["active_server"] = new_id
     return out
 
 
@@ -137,12 +156,8 @@ def _is_ip(text):
         return False
 
 
-def validate(raw):
-    """Return a normalised copy of *raw* or raise ConfigError listing every problem."""
-    cfg = merge(defaults(), raw)
-    errors = []
-
-    proxy = cfg["proxy"]
+def _normalise_proxy(proxy, errors):
+    """Check and tidy one `proxy` section in place, appending problems to *errors*."""
     for field in ("link", "private_key"):
         if not isinstance(proxy[field], str):
             errors.append(f"proxy {field} must be text")
@@ -194,6 +209,136 @@ def validate(raw):
         if ":" in proxy["username"] and proxy["type"] == "http":
             errors.append("an HTTP proxy username cannot contain ':'")
 
+
+def _next_server_id(servers):
+    taken = {server.get("id") for server in servers if isinstance(server, dict)}
+    number = 1
+    while f"s{number}" in taken:
+        number += 1
+    return f"s{number}"
+
+
+def server_name(server):
+    """What to call a saved server: its own name, the name in its link, or its address."""
+    if server.get("name"):
+        return server["name"]
+    proxy = server["proxy"]
+    if proxy.get("link"):
+        try:
+            name = links.parse(proxy["link"])["name"]
+            if name:
+                return name
+        except links.LinkError:
+            pass
+    return proxy.get("host") or "New server"
+
+
+def _normalise_servers(cfg, errors, proxy_before):
+    """`servers` is the list of saved servers; `proxy` always mirrors the one in use."""
+    servers = cfg["servers"]
+    if not isinstance(servers, list) or len(servers) > MAX_SERVERS:
+        errors.append(f"'servers' must be a list of at most {MAX_SERVERS} servers")
+        cfg["servers"] = []
+        return
+    seen = set()
+    for position, server in enumerate(servers, 1):
+        if (not isinstance(server, dict) or set(server) != {"id", "name", "proxy"}
+                or not isinstance(server["proxy"], dict) or set(server["proxy"]) != set(DEFAULTS["proxy"])):
+            errors.append(f"server {position} is malformed")
+            continue
+        if not isinstance(server["id"], str) or not re.fullmatch(r"[a-z0-9]{1,16}", server["id"]) \
+                or server["id"] in seen:
+            errors.append(f"server {position} has a bad or repeated id")
+            continue
+        seen.add(server["id"])
+        if not isinstance(server["name"], str):
+            errors.append(f"server {position}: the name must be text")
+            continue
+        server["name"] = " ".join("".join(ch for ch in server["name"] if ch.isprintable()).split())[:60]
+        # The server in use was already checked as `proxy`: do not say everything twice.
+        mirrored = server["id"] == cfg["active_server"] and server["proxy"] == proxy_before
+        problems = []
+        _normalise_proxy(server["proxy"], problems)
+        if not mirrored:
+            errors.extend(problems)
+        if not problems and not server["proxy"]["host"]:
+            errors.append("the server has no address")
+    active = cfg["active_server"]
+    if not isinstance(active, str):
+        errors.append("'active_server' must be text")
+        return
+    if errors:
+        return
+    by_id = {server["id"]: server for server in servers}
+    if active and active not in by_id:
+        errors.append("'active_server' is not one of the saved servers")
+    elif active:
+        cfg["proxy"] = copy.deepcopy(by_id[active]["proxy"])
+    elif cfg["proxy"]["host"] and not servers:
+        # A configuration from before there was a list: its proxy becomes the first entry.
+        servers.append({"id": "s1", "name": "", "proxy": copy.deepcopy(cfg["proxy"])})
+        cfg["active_server"] = "s1"
+    elif cfg["proxy"]["host"]:
+        errors.append("no server is selected")
+
+
+def save_server(cfg, server_id=None, name=None, proxy=None):
+    """Add a server (no id) or change one. Returns (configuration patch source, id).
+
+    The result still has to go through `validate`. Secrets set to None in
+    *proxy* are kept as stored.
+    """
+    out = copy.deepcopy(cfg)
+    if server_id is None:
+        server = {"id": _next_server_id(out["servers"]), "name": "", "proxy": copy.deepcopy(DEFAULTS["proxy"])}
+        out["servers"].append(server)
+    else:
+        server = next((item for item in out["servers"] if item["id"] == server_id), None)
+        if server is None:
+            raise ConfigError("that server no longer exists")
+    if name is not None:
+        server["name"] = name
+    if proxy is not None:
+        if not isinstance(proxy, dict):
+            raise ConfigError("'proxy' must be an object")
+        server["proxy"] = merge({"proxy": server["proxy"]}, {"proxy": proxy}, known={"proxy"})["proxy"]
+    if not out["active_server"]:
+        out["active_server"] = server["id"]       # the first server is the one in use
+    if out["active_server"] == server["id"]:
+        out["proxy"] = copy.deepcopy(server["proxy"])
+    return out, server["id"]
+
+
+def remove_server(cfg, server_id):
+    out = copy.deepcopy(cfg)
+    if not any(server["id"] == server_id for server in out["servers"]):
+        raise ConfigError("that server no longer exists")
+    out["servers"] = [server for server in out["servers"] if server["id"] != server_id]
+    if out["active_server"] == server_id:
+        out["active_server"] = ""
+        out["proxy"] = copy.deepcopy(DEFAULTS["proxy"])
+    return out
+
+
+def select_server(cfg, server_id):
+    out = copy.deepcopy(cfg)
+    server = next((item for item in out["servers"] if item["id"] == server_id), None)
+    if server is None:
+        raise ConfigError("that server no longer exists")
+    out["active_server"] = server_id
+    out["proxy"] = copy.deepcopy(server["proxy"])
+    return out
+
+
+def validate(raw):
+    """Return a normalised copy of *raw* or raise ConfigError listing every problem."""
+    cfg = merge(defaults(), raw)
+    errors = []
+
+    before = copy.deepcopy(cfg["proxy"])
+    _normalise_proxy(cfg["proxy"], errors)
+    _normalise_servers(cfg, errors, before)
+
     for flag in ("kill_switch", "allow_lan"):
         if not isinstance(cfg[flag], bool):
             errors.append(f"'{flag}' must be true or false")
@@ -215,7 +360,7 @@ def validate(raw):
     else:
         cfg["remote_dns"] = cfg["remote_dns"].strip()
 
-    for key in ("ip_check_url", "geo_url"):
+    for key in ("ip_check_url", "geo_url", "test_url"):
         url = cfg[key]
         if not isinstance(url, str) or (url and not re.match(r"^https?://[^/\s]+", url.strip())):
             errors.append(f"'{key}' must be an http(s) URL or empty")
@@ -241,8 +386,13 @@ def validate(raw):
         value = cfg[key]
         if isinstance(value, bool) or not isinstance(value, int) or not 1024 <= value <= 65535:
             errors.append(f"'{key}' must be a number between 1024 and 65535")
-    if len({cfg["tcp_port"], cfg["dns_port"], cfg["engine_port"]}) != 3:
-        errors.append("'tcp_port', 'dns_port' and 'engine_port' must differ")
+    if cfg["tcp_port"] == cfg["dns_port"]:
+        errors.append("'tcp_port' and 'dns_port' must differ")
+    if isinstance(cfg["engine_port"], int) and not isinstance(cfg["engine_port"], bool):
+        helpers = range(cfg["engine_port"], cfg["engine_port"] + ENGINE_PORTS)
+        if helpers[-1] > 65535 or cfg["tcp_port"] in helpers or cfg["dns_port"] in helpers:
+            errors.append(f"'engine_port' and the {ENGINE_PORTS - 1} ports after it must be free of "
+                          "'tcp_port' and 'dns_port', and below 65536")
     if not isinstance(cfg["engine_path"], str) or (cfg["engine_path"] and not cfg["engine_path"].startswith("/")):
         errors.append("'engine_path' must be an absolute path or empty")
     mark = cfg["fwmark"]
@@ -259,17 +409,20 @@ def validate(raw):
 def public_view(cfg):
     """Configuration as shown to clients: the password never leaves the daemon."""
     out = copy.deepcopy(cfg)
-    proxy = out["proxy"]
-    proxy["password_set"] = bool(proxy.pop("password"))
-    proxy["key_set"] = bool(proxy.pop("private_key"))
-    link = proxy.pop("link")
-    proxy["link_set"] = bool(link)
-    proxy["name"] = ""
-    if link:
-        try:
-            proxy["name"] = links.parse(link)["name"]
-        except links.LinkError:
-            pass
+    for server in out["servers"]:
+        server["label"] = server_name(server)
+        server["address"] = proxy_label(server)
+    for proxy in [out["proxy"]] + [server["proxy"] for server in out["servers"]]:
+        proxy["password_set"] = bool(proxy.pop("password"))
+        proxy["key_set"] = bool(proxy.pop("private_key"))
+        link = proxy.pop("link")
+        proxy["link_set"] = bool(link)
+        proxy["name"] = ""
+        if link:
+            try:
+                proxy["name"] = links.parse(link)["name"]
+            except links.LinkError:
+                pass
     return out
 
 

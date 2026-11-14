@@ -61,5 +61,18 @@ class Client:
     def set_config(self, patch):
         return self.request("set_config", config=patch)["config"]
 
+    def server_save(self, server_id=None, name=None, proxy=None):
+        """Add (no id) or change a saved server. Returns its id."""
+        return self.request("server_save", id=server_id, name=name, proxy=proxy)["id"]
+
+    def server_remove(self, server_id):
+        return self.request("server_remove", id=server_id)["config"]
+
+    def server_select(self, server_id):
+        return self.request("server_select", id=server_id)["config"]
+
+    def server_test(self, server_ids=None):
+        return self.request("server_test", ids=server_ids)["started"]
+
     def logs(self, count=200):
         return self.request("logs", count=count)["lines"]

@@ -24,6 +24,8 @@ CHECK_TIMEOUT = 10.0      # the public IP lookup
 GEO_TIMEOUT = 8.0         # the city lookup
 GEO_RETRY = 300.0         # ask again for the same address after a failed city lookup
 VERDICT_RETRY = 3.0       # while traffic is held back, check again at most this often
+INTERNET_INTERVAL = 30.0  # how often the way to the outside world is timed (one tiny request)
+INTERNET_TIMEOUT = 10.0
 
 
 def parse_ip_reply(body):
@@ -41,6 +43,11 @@ class Monitor:
         self.last_error = None
         self.public_ip = None
         self.country = None
+        # Through the proxy to the outside world (`test_url`): None = not measured yet.
+        self.internet_ms = None
+        self.internet_ok = None
+        self._internet_at = 0.0
+        self._internet_task = None
         # Country gate. "ok" means: the last check found the exit outside every
         # blocked country. Anything else holds proxied traffic back.
         self.exit_verdict = "unknown"   # unknown | ok | blocked
@@ -68,8 +75,9 @@ class Monitor:
             self._task = asyncio.ensure_future(self._run())
 
     async def stop(self):
-        tasks = [t for t in (self._task, self._check[0] if self._check else None) if t is not None]
-        self._task = self._check = None
+        tasks = [t for t in (self._task, self._internet_task, self._check[0] if self._check else None)
+                 if t is not None]
+        self._task = self._check = self._internet_task = None
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -92,6 +100,11 @@ class Monitor:
             self._check[0].cancel()
             self._check = None
         self.latency_ms = self.last_error = self.public_ip = self.country = None
+        self.internet_ms = self.internet_ok = None
+        self._internet_at = 0.0
+        if self._internet_task is not None:
+            self._internet_task.cancel()
+            self._internet_task = None
         self.exit_verdict, self.exit_error = "unknown", None
         self._verified_at = self._checked_at = self._ip_at = 0.0
 
@@ -132,6 +145,10 @@ class Monitor:
                 due = self._ip_at == 0.0 or time.monotonic() - self._ip_at > IP_REFRESH
                 if due or (self.guarding and self.exit_verdict != "ok"):
                     self._start_check()
+                if (core.cfg["test_url"] and time.monotonic() - self._internet_at > INTERNET_INTERVAL
+                        and (self._internet_task is None or self._internet_task.done())):
+                    self._internet_at = time.monotonic()
+                    self._internet_task = asyncio.ensure_future(self._time_internet(core.cfg["test_url"]))
             else:
                 failures += 1
                 self.last_error = error
@@ -147,6 +164,23 @@ class Monitor:
                                        INTERVAL_UP if self.state == "connected" else INTERVAL_DOWN)
             except asyncio.TimeoutError:
                 pass
+
+    async def _time_internet(self, url):
+        """How long does one small request to the outside world take through the proxy?"""
+        try:
+            if not await self.permit():
+                self.internet_ms = self.internet_ok = None  # nothing may be sent: nothing to measure
+                return
+            status, elapsed = await asyncio.wait_for(http_latency(self.core.dial_proxy, url), INTERNET_TIMEOUT)
+            if self.state == "connected":
+                self.internet_ok = 200 <= status < 400
+                self.internet_ms = elapsed if self.internet_ok else None
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.debug("internet check failed: %s", exc or type(exc).__name__)
+            if self.state == "connected":
+                self.internet_ms, self.internet_ok = None, False
 
     # ------------------------------------------------------------ country gate
     async def permit(self):
@@ -182,8 +216,11 @@ class Monitor:
         return self.exit_verdict == "ok" and self._verified_at >= arrived - max_age
 
     def policy_changed(self):
-        """The list of blocked countries changed: apply it to what is known now."""
+        """The blocked countries or the services asked changed: apply that to what is known now."""
         self._verified_at = 0.0
+        self._internet_at = 0.0     # time the way out again, soon
+        self.internet_ms = self.internet_ok = None
+        self._wake.set()
         if self.state != "connected":
             return
         if not self.guarding:
@@ -310,14 +347,14 @@ def _tls():
     return _tls_context
 
 
-async def fetch(core, url):
-    """Minimal HTTP/1.0 GET through the proxy. Returns the body as text."""
+async def http_get(dial, url, limit=65536):
+    """Minimal HTTP/1.0 GET over a connection made by *dial(host, port)*. Returns (status, body)."""
     parts = urlsplit(url)
     secure = parts.scheme == "https"
     host = parts.hostname
     port = parts.port or (443 if secure else 80)
     path = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
-    sock, _ = await core.dial_proxy(host, port)
+    sock, _ = await dial(host, port)
     try:
         reader, writer = await asyncio.open_connection(
             sock=sock, ssl=_tls() if secure else None, server_hostname=host if secure else None)
@@ -328,16 +365,104 @@ async def fetch(core, url):
         writer.write((f"GET {path} HTTP/1.0\r\nHost: {host}\r\nUser-Agent: proxywall\r\n"
                       "Accept: */*\r\nConnection: close\r\n\r\n").encode("latin-1"))
         await writer.drain()
-        raw = await reader.read(65536)
-        while len(raw) < 65536:
+        raw = b""
+        while len(raw) < limit:
             chunk = await reader.read(65536)
             if not chunk:
                 break
             raw += chunk
+            # Stop as soon as the announced body is complete: not every tunnel
+            # passes the server's "closed" on promptly.
+            head, separator, body = raw.partition(b"\r\n\r\n")
+            if separator:
+                if head.split(b" ", 2)[1:2] in ([b"204"], [b"304"]):
+                    break
+                sizes = [line.split(b":", 1)[1].strip() for line in head.split(b"\r\n")
+                         if line.lower().startswith(b"content-length:")]
+                if sizes and sizes[0].isdigit() and len(body) >= int(sizes[0]):
+                    break
     finally:
         writer.transport.abort()
     head, _, body = raw.partition(b"\r\n\r\n")
     status = head.split(b"\r\n", 1)[0].split()
-    if len(status) < 2 or status[1] != b"200":
+    if len(status) < 2 or not status[0].startswith(b"HTTP/") or not status[1].isdigit():
         raise OSError("unexpected HTTP reply")
-    return body.decode("utf-8", "replace")
+    return int(status[1]), body.decode("utf-8", "replace")
+
+
+async def _read_reply(reader):
+    """Read one HTTP/1.1 reply. Returns (status, reusable): may another request follow on this connection?"""
+    head = await reader.readuntil(b"\r\n\r\n")
+    lines = head.split(b"\r\n")
+    parts = lines[0].split()
+    if len(parts) < 2 or not parts[0].startswith(b"HTTP/") or not parts[1].isdigit():
+        raise OSError("unexpected HTTP reply")
+    status = int(parts[1])
+    headers = {}
+    for line in lines[1:]:
+        name, separator, value = line.partition(b":")
+        if separator:
+            headers[name.strip().lower()] = value.strip().lower()
+    if status in (204, 304) or 100 <= status < 200:
+        length = 0
+    elif headers.get(b"content-length", b"").isdigit():
+        length = int(headers[b"content-length"])
+    else:
+        return status, False        # chunked or until-close: not worth following
+    if length > 1_000_000:
+        return status, False
+    if length:
+        await reader.readexactly(length)
+    return status, parts[0] != b"HTTP/1.0" and headers.get(b"connection") != b"close"
+
+
+async def http_latency(dial, url):
+    """How long does a round trip to *url* take through *dial*? Returns (status, milliseconds).
+
+    The first request pays for opening the connection (and TLS), which says more
+    about the handshakes than about the line. So a second request is sent on the
+    same connection and that one is timed. Where the server does not keep the
+    connection open, the time of the whole first request is returned instead.
+    """
+    parts = urlsplit(url)
+    secure = parts.scheme == "https"
+    host = parts.hostname
+    port = parts.port or (443 if secure else 80)
+    path = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
+    request = (f"GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: proxywall\r\n"
+               "Accept: */*\r\nConnection: keep-alive\r\n\r\n").encode("latin-1")
+    started = time.monotonic()
+    sock, _ = await dial(host, port)
+    try:
+        reader, writer = await asyncio.open_connection(
+            sock=sock, ssl=_tls() if secure else None, server_hostname=host if secure else None)
+    except BaseException:
+        sock.close()
+        raise
+    try:
+        writer.write(request)
+        await writer.drain()
+        status, reusable = await _read_reply(reader)
+        elapsed = time.monotonic() - started
+        if reusable:
+            try:
+                again = time.monotonic()
+                writer.write(request)
+                await writer.drain()
+                await _read_reply(reader)
+                elapsed = time.monotonic() - again
+            except (OSError, asyncio.IncompleteReadError, asyncio.LimitOverrunError):
+                pass  # the server changed its mind: the first measurement stands
+    except (asyncio.IncompleteReadError, asyncio.LimitOverrunError):
+        raise OSError("unexpected HTTP reply") from None
+    finally:
+        writer.transport.abort()
+    return status, max(1, int(elapsed * 1000))
+
+
+async def fetch(core, url):
+    """GET *url* through the proxy in use. Returns the body; anything but 200 is an error."""
+    status, body = await http_get(core.dial_proxy, url)
+    if status != 200:
+        raise OSError("unexpected HTTP reply")
+    return body

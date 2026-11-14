@@ -69,7 +69,11 @@ class EngineCase(unittest.TestCase):
         for process in self.servers:
             process.terminate()
         for process in self.servers:
-            process.wait()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
 
     def spawn(self, command, port):
         process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

@@ -58,7 +58,11 @@ def cmd_status(client, args):
         elif place:
             print(f"Location     {place}")
         if status.get("latency_ms") is not None:
-            print(f"Latency      {status['latency_ms']} ms")
+            print(f"Latency      {status['latency_ms']} ms to the server")
+        if status.get("internet_ok") is not None:
+            host = status.get("test_host") or "the test page"
+            print(f"Internet     {status['internet_ms']} ms to {host}" if status["internet_ok"]
+                  else f"Internet     {host} does not answer through this server")
     if status.get("blocked_countries"):
         print(f"Blocked      {', '.join(status['blocked_countries'])}")
     print(f"Kill switch  {'on' if status['kill_switch'] else 'off'}")
@@ -152,6 +156,69 @@ def country_code(text):
         if entry[0].lower() == wanted.lower():
             return code
     raise config.ConfigError(f"'{text}' is not a country code or name (see: proxywall block-country codes)")
+
+
+def _test_text(result):
+    if not result:
+        return "not tested"
+    if result["state"] != "done":
+        return "testing..."
+    parts = [f"ping {result['ping_ms']} ms" if result["ping_ms"] is not None else "no ping"]
+    if result["reach"]:
+        parts.append(f"internet {result['reach_ms']} ms")
+    elif result["reach"] is False:
+        parts.append("internet unreachable")
+    if result.get("country"):
+        parts.append(result["country"])
+    if result.get("error"):
+        parts.append(result["error"])
+    return ", ".join(parts)
+
+
+def _server_id(client, text):
+    """A server by id, by position in the list (1, 2, ...) or by exact name."""
+    servers = client.status()["servers"]
+    for server in servers:
+        if text in (server["id"], server["name"]):
+            return server["id"]
+    if text.isdigit() and 1 <= int(text) <= len(servers):
+        return servers[int(text) - 1]["id"]
+    raise config.ConfigError(f"no server '{text}' (see: proxywall server list)")
+
+
+def cmd_server(client, args):
+    if args.action == "add":
+        if not args.items:
+            print("give at least one address or link", file=sys.stderr)
+            return 2
+        for url in args.items:
+            client.server_save(None, args.name if len(args.items) == 1 else None, config.parse_proxy_url(url))
+    elif args.action in ("use", "remove"):
+        if len(args.items) != 1:
+            print(f"usage: proxywall server {args.action} SERVER", file=sys.stderr)
+            return 2
+        server = _server_id(client, args.items[0])
+        (client.server_select if args.action == "use" else client.server_remove)(server)
+    elif args.action == "test":
+        ids = [_server_id(client, item) for item in args.items] or None
+        client.server_test(ids)
+        deadline = time.monotonic() + 90
+        while time.monotonic() < deadline:
+            tests = client.status()["tests"]
+            wanted = ids or [server["id"] for server in client.status()["servers"]]
+            if all(tests.get(server, {}).get("state") == "done" for server in wanted):
+                break
+            time.sleep(0.4)
+    status = client.status()
+    if not status["servers"]:
+        print("(no servers)")
+    for number, server in enumerate(status["servers"], 1):
+        mark = "*" if server["id"] == status["active_server"] else " "
+        line = f"{mark} {number:>2}  {server['name']:<24.24}  {server['address']:<38.38}"
+        if args.action == "test" or status["tests"].get(server["id"]):
+            line += "  " + _test_text(status["tests"].get(server["id"]))
+        print(line.rstrip())
+    return 0
 
 
 def cmd_block_country(client, args):
@@ -260,6 +327,12 @@ def build_parser():
     p.add_argument("action", choices=("list", "add", "remove"))
     p.add_argument("entries", nargs="*", metavar="ENTRY", help="domain (*.ir), IP or network (10.0.0.0/8)")
     p.set_defaults(func=cmd_exclude)
+
+    p = sub.add_parser("server", help="saved servers: list, add, use, remove, test")
+    p.add_argument("action", choices=("list", "add", "use", "remove", "test"))
+    p.add_argument("items", nargs="*", metavar="SERVER", help="address or link (add); number, id or name (others)")
+    p.add_argument("--name", help="a name for the server being added")
+    p.set_defaults(func=cmd_server)
 
     p = sub.add_parser("block-country",
                        help="never send traffic while the proxy comes out in these countries")

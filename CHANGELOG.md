@@ -4,6 +4,19 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.3.0] - 2026-11-15
+
+### Added
+
+- A list of saved servers: add as many as you like, paste several links at once, click the one to use, switch while connected. `proxywall server list|add|use|remove|test` does the same from a terminal.
+- Server tests: ping to the server, exit country, and whether a small page (`test_url`, Google's by default) can be fetched through it. Tests use the service's own connections, work behind the kill switch, and do not fetch the page through an exit in a blocked country.
+- Internet latency while connected, next to the latency to the server (one small request every 30 seconds).
+
+### Changed
+
+- The window is larger and has two panes: the connection on the left, servers and settings on the right. It can be resized.
+- An existing configuration is kept: its proxy becomes the first server in the list.
+
 ## [1.2.0] - 2026-11-14
 
 ### Added
@@ -40,6 +53,7 @@ First release.
 - GTK 3 desktop interface with tray icon, `proxywall` command line tool.
 - Debian package with a sandboxed systemd service.
 
+[1.3.0]: https://github.com/ArefMousakhani/proxywall/releases/tag/v1.3.0
 [1.2.0]: https://github.com/ArefMousakhani/proxywall/releases/tag/v1.2.0
 [1.1.0]: https://github.com/ArefMousakhani/proxywall/releases/tag/v1.1.0
 [1.0.0]: https://github.com/ArefMousakhani/proxywall/releases/tag/v1.0.0

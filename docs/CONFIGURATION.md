@@ -12,8 +12,11 @@ Settings are changed from the window, with the `proxywall` command, or both; the
 | `proxy.username`, `proxy.password` | *(empty)* | credentials, if the proxy needs them; for `ssh` the login (the password also unlocks an encrypted key) |
 | `proxy.private_key` | *(empty)* | `ssh` only: the text of a private key file |
 | `proxy.link` | *(empty)* | the share link of a VLESS, VMess, Trojan or Shadowsocks server |
+| `servers` | `[]` | the saved servers, each `{"id", "name", "proxy"}`; change them with `proxywall server` or in the window |
+| `active_server` | *(empty)* | id of the server in use; `proxy` is always a copy of that server |
+| `test_url` | `https://www.google.com/generate_204` | fetched through a server to see whether it reaches the internet, by server tests and every 30 s while connected; empty = never |
 | `engine_path` | *(empty)* | where the `xray` program is; empty = `/usr/lib/proxywall`, `/usr/local/bin`, `/usr/bin`, `/opt/xray`, then the `PATH` |
-| `engine_port` | `47210` | local port of the helper process (`xray` or `ssh`) |
+| `engine_port` | `47210` | local port of the helper process (`xray` or `ssh`); the nine ports after it are used by server tests |
 | `kill_switch` | `false` | the *Firewall* switch: block all traffic whenever you are not connected, also after a reboot |
 | `allow_lan` | `true` | private and link-local networks bypass the proxy |
 | `exclude` | `[]` | domains, addresses and networks that bypass the proxy |
@@ -28,6 +31,12 @@ Settings are changed from the window, with the `proxywall` command, or both; the
 | `log_level` | `info` | `debug`, `info`, `warning` or `error` |
 
 With *Allow LAN* on, these ranges go out directly: `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `169.254.0.0/16`, multicast and broadcast, and for IPv6 `fc00::/7`, `fe80::/10`, `ff01::/16`, `ff02::/16`.
+
+### Servers and tests
+
+`proxywall set-proxy` changes the server in use (or creates the first one); `proxywall server add` adds more. A test of a server does three things, all with the service's own marked connections: it times a TCP connection to the server ("ping"); it asks `ip_check_url` through the server where it comes out; and it fetches `test_url` through it. The last step is skipped when countries are blocked and the exit is in one of them or unknown. SSH and share-link servers are tested through a helper of their own on a spare port, so a test never touches the tunnel in use.
+
+While connected, `test_url` is also fetched every 30 seconds through the server in use; `proxywall status` and the window show the time as *Internet*. The number is the time of a second request on the connection the first one opened, so it is a round trip rather than the cost of the handshakes (where the page does not keep the connection open, the whole first request is timed). It is a few hundred bytes, and like your own traffic it is not sent while the exit is blocked.
 
 ### Location
 
@@ -81,6 +90,11 @@ proxywall connect [--wait SECONDS]   send all traffic through the proxy
 proxywall disconnect                 stop using the proxy
 proxywall set-proxy URL [--key FILE] socks5://[user:pass@]host[:port], http://..., ssh://user[:pass]@host[:port],
                                      or a vless:// vmess:// trojan:// ss:// share link
+proxywall server list                the saved servers; * marks the one in use
+proxywall server add URL... [--name NAME]
+proxywall server use SERVER          SERVER is a number from the list, a name or an id
+proxywall server remove SERVER
+proxywall server test [SERVER...]    ping and internet check, without using the server
 proxywall kill-switch on|off         the Firewall switch
 proxywall lan on|off                 Allow LAN
 proxywall exclude list

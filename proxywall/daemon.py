@@ -9,6 +9,7 @@ import os
 import signal
 import sys
 import time
+from urllib.parse import urlsplit
 
 from . import __version__, config, dnsmsg, firewall, paths, upstream
 from .control import ControlServer
@@ -18,6 +19,7 @@ from .fakeip import FakeIPPool
 from .monitor import Monitor
 from .resolver import DirectResolver, ResolveError, exchange_over_stream
 from .rules import ExcludeRules
+from .tester import Tester
 from .tproxy import TransparentProxy
 
 log = logging.getLogger("proxywall")
@@ -75,6 +77,7 @@ class Core:
         self.dns = DnsServer(self)
         self.monitor = Monitor(self)
         self.engine = Engine(self)
+        self.tester = Tester(self)
         self.control = ControlServer(self, paths.SOCKET_PATH)
         self._lock = asyncio.Lock()
         self._stop = asyncio.Event()
@@ -199,7 +202,7 @@ class Core:
                 log.error("%s", listen_error)
             bypass4, bypass6 = self.rules.bypass_sets()
             script = firewall.render(cfg["tcp_port"], cfg["dns_port"], cfg["fwmark"], bypass4, bypass6,
-                                     engine_port=cfg["engine_port"])
+                                     engine_port=cfg["engine_port"], engine_ports=config.ENGINE_PORTS)
             try:
                 self.firewall.apply(script)
                 self.active = True
@@ -257,9 +260,16 @@ class Core:
             "proxy_configured": bool(self.cfg["proxy"]["host"]),
             "since": monitor.since if self.enabled else None,
             "latency_ms": monitor.latency_ms,
+            "internet_ms": monitor.internet_ms,
+            "internet_ok": monitor.internet_ok,
+            "test_host": urlsplit(self.cfg["test_url"]).hostname or "",
             "public_ip": monitor.public_ip,
             **monitor.location(),
             "blocked_countries": list(self.cfg["blocked_countries"]),
+            "active_server": self.cfg["active_server"],
+            "servers": [{"id": server["id"], "name": config.server_name(server), "type": server["proxy"]["type"],
+                         "address": config.proxy_label(server)} for server in self.cfg["servers"]],
+            "tests": self.tester.view(),
             "error": self.error or self.config_error or (
                 (monitor.last_error or (monitor.exit_error if monitor.guarding else None))
                 if self.enabled else None),
@@ -273,31 +283,64 @@ class Core:
     async def cmd_set_config(self, request):
         patch = request.get("config")
         async with self._lock:
-            new = config.validate(config.merge(self.cfg, patch))
-            if new == self.cfg:
-                return {"config": config.public_view(self.cfg)}
-            if self.enabled and not new["proxy"]["host"]:
-                raise config.ConfigError("disconnect before removing the proxy")
-            proxy_changed = new["proxy"] != self.cfg["proxy"]
-            gate_changed = any(new[key] != self.cfg[key] for key in (
-                "blocked_countries", "country_check_seconds", "ip_check_url", "geo_url"))
-            ports_changed = (new["tcp_port"], new["dns_port"], new["fwmark"]) != (
-                self.cfg["tcp_port"], self.cfg["dns_port"], self.cfg["fwmark"])
-            proxy_changed = proxy_changed or (new["engine_port"], new["engine_path"]) != (
-                self.cfg["engine_port"], self.cfg["engine_path"])
-            config.save(paths.CONFIG_FILE, new)
-            self.cfg, self.config_error = new, None
-            self._adopt_config()
-            if ports_changed and self.active:
-                await self.tproxy.stop()
-                await self.dns.stop()
-            await self.reconcile()
-            if proxy_changed:
-                self.monitor.restart()
-            elif gate_changed:
-                self.monitor.policy_changed()
-            log.info("configuration updated")
+            return await self._apply(config.validate(config.merge(self.cfg, patch)))
+
+    async def cmd_server_save(self, request):
+        """Add a server (no `id`) or change one. Secrets sent as null are kept."""
+        async with self._lock:
+            new, server_id = config.save_server(self.cfg, request.get("id"), request.get("name"),
+                                                request.get("proxy"))
+            self.tester.forget(server_id)
+            return dict(await self._apply(config.validate(new)), id=server_id)
+
+    async def cmd_server_remove(self, request):
+        async with self._lock:
+            server_id = request.get("id")
+            if self.enabled and server_id == self.cfg["active_server"]:
+                raise CommandError("Disconnect before removing the server in use")
+            new = config.validate(config.remove_server(self.cfg, server_id))
+            self.tester.forget(server_id)
+            return await self._apply(new)
+
+    async def cmd_server_select(self, request):
+        """Use another saved server. While connected, traffic moves over at once."""
+        async with self._lock:
+            return await self._apply(config.validate(config.select_server(self.cfg, request.get("id"))))
+
+    async def cmd_server_test(self, request):
+        ids = request.get("ids")
+        if ids is not None and (not isinstance(ids, list) or not all(isinstance(item, str) for item in ids)):
+            raise CommandError("'ids' must be a list of server ids")
+        return {"started": self.tester.start(ids)}
+
+    async def _apply(self, new):
+        """Make a validated configuration the current one (the caller holds the lock)."""
+        if new == self.cfg:
             return {"config": config.public_view(self.cfg)}
+        if self.enabled and not new["proxy"]["host"]:
+            raise config.ConfigError("disconnect before removing the proxy")
+        proxy_changed = new["proxy"] != self.cfg["proxy"]
+        gate_changed = any(new[key] != self.cfg[key] for key in (
+            "blocked_countries", "country_check_seconds", "ip_check_url", "geo_url", "test_url"))
+        ports_changed = (new["tcp_port"], new["dns_port"], new["fwmark"]) != (
+            self.cfg["tcp_port"], self.cfg["dns_port"], self.cfg["fwmark"])
+        proxy_changed = proxy_changed or (new["engine_port"], new["engine_path"]) != (
+            self.cfg["engine_port"], self.cfg["engine_path"])
+        config.save(paths.CONFIG_FILE, new)
+        self.cfg, self.config_error = new, None
+        self._adopt_config()
+        if ports_changed and self.active:
+            await self.tproxy.stop()
+            await self.dns.stop()
+        await self.reconcile()
+        if proxy_changed:
+            self.monitor.restart()
+            if self.active:
+                self.tproxy.close_connections(proxied_only=True)  # they belong to the old server
+        elif gate_changed:
+            self.monitor.policy_changed()
+        log.info("configuration updated")
+        return {"config": config.public_view(self.cfg)}
 
     async def cmd_connect(self, _request):
         async with self._lock:
@@ -359,6 +402,7 @@ class Core:
             saver.cancel()
             await self.control.stop()
             await self.monitor.stop()
+            await self.tester.stop()
             await self.engine.stop()
             await self.tproxy.stop()
             await self.dns.stop()

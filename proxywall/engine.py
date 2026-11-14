@@ -66,8 +66,10 @@ def _write_private(path, text, mode=0o600):
 class Engine:
     """Keeps one engine process running for the configured server, restarting it when it dies."""
 
-    def __init__(self, core):
+    def __init__(self, core, port=None, quiet=False):
         self.core = core
+        self._port = port          # None: the configured engine_port (the tunnel in use)
+        self._quiet = quiet        # a short-lived test helper should not fill the log
         self.user = "proxywall"
         self.password = secrets.token_urlsafe(18)   # between the daemon and Xray's local port
         self.error = None                           # why the engine is not running, for people
@@ -79,7 +81,13 @@ class Engine:
 
     @property
     def port(self):
-        return self.core.cfg["engine_port"]
+        return self._port or self.core.cfg["engine_port"]
+
+    @property
+    def _files(self):
+        suffix = f"-{self._port}" if self._port else ""
+        return (os.path.join(paths.RUNTIME_DIR, f"engine{suffix}.json"),
+                os.path.join(paths.RUNTIME_DIR, f"engine_key{suffix}"))
 
     def settings(self, kind):
         """How the daemon reaches the engine. ssh -D cannot ask for a password; Xray does."""
@@ -125,7 +133,7 @@ class Engine:
                 self.error = f"the engine could not be started: {exc}"
             self.running = False
             self._ready.set()  # whoever waits for the start should stop waiting
-            log.warning("engine stopped: %s", self.error)
+            log.log(logging.DEBUG if self._quiet else logging.WARNING, "engine stopped: %s", self.error)
             if time.monotonic() - started > 30:
                 delay = 1.0
             await asyncio.sleep(delay)
@@ -188,7 +196,7 @@ class Engine:
             sock.close()
             self.running, self.error = True, None
             self._ready.set()
-            log.info("engine is up on 127.0.0.1:%d", self.port)
+            log.log(logging.DEBUG if self._quiet else logging.INFO, "engine is up on 127.0.0.1:%d", self.port)
             return
 
     async def _kill(self, process):
@@ -216,7 +224,7 @@ class Engine:
             config = links.xray_config(server, address, self.port, self.user, self.password, self.core.mark)
         except links.LinkError as exc:
             raise EngineError(str(exc)) from None
-        path = os.path.join(paths.RUNTIME_DIR, "engine.json")
+        path = self._files[0]
         _write_private(path, json.dumps(config))
         env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "XRAY_LOCATION_ASSET": paths.RUNTIME_DIR}
         return [program, "run", "-c", path], env, [path]
@@ -254,7 +262,7 @@ class Engine:
         command = [program, "-N", "-T", "-F", "/dev/null", "-D", f"127.0.0.1:{self.port}",
                    "-p", str(proxy["port"]), "-l", proxy["username"]]
         if proxy["private_key"]:
-            key = os.path.join(paths.RUNTIME_DIR, "engine_key")
+            key = self._files[1]
             _write_private(key, proxy["private_key"].rstrip("\n") + "\n")
             cleanup.append(key)
             command += ["-i", key]

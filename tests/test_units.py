@@ -244,12 +244,160 @@ class ServerConfigTest(unittest.TestCase):
 
     def test_engine_port(self):
         with self.assertRaises(config.ConfigError):
-            config.validate({"engine_port": 47201})
+            config.validate({"engine_port": 47200})
         with self.assertRaises(config.ConfigError):
             config.validate({"engine_path": "xray"})
         rules = firewall.render(47201, 47253, 0x5057, [], [], engine_port=47210)
         self.assertIn("tcp dport 47210 meta mark != 0x5057 reject with tcp reset", rules)
         self.assertLess(rules.index("tcp dport 47210"), rules.index('iifname "lo" accept'))
+
+
+class HttpLatencyTest(unittest.TestCase):
+    """The internet latency is the time of a second request on an open connection."""
+
+    def measure(self, replies, slow_first=0.25):
+        seen = []
+
+        async def serve(reader, writer):
+            try:
+                for index, reply in enumerate(replies):
+                    seen.append(await reader.readuntil(b"\r\n\r\n"))
+                    if index == 0:
+                        await asyncio.sleep(slow_first)          # stands for connection set-up
+                    writer.write(reply)
+                    await writer.drain()
+            except (asyncio.IncompleteReadError, ConnectionError):
+                pass
+            writer.close()
+
+        async def scenario():
+            server = await asyncio.start_server(serve, "127.0.0.1", 0)
+            port = server.sockets[0].getsockname()[1]
+
+            async def dial(host, _port):
+                return await upstream.tcp_connect("127.0.0.1", port), b""
+            try:
+                return await monitor.http_latency(dial, "http://test.example/generate_204")
+            finally:
+                server.close()
+
+        return run(scenario()), seen
+
+    def test_second_request_is_the_one_that_counts(self):
+        reply = b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n"
+        (status, elapsed), seen = self.measure([reply, reply])
+        self.assertEqual((status, len(seen)), (204, 2))
+        self.assertLess(elapsed, 200)                            # not the 250 ms the first one took
+        self.assertIn(b"Host: test.example", seen[0])
+
+    def test_body_is_skipped_before_asking_again(self):
+        reply = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello"
+        (status, elapsed), seen = self.measure([reply, reply])
+        self.assertEqual((status, len(seen)), (200, 2))
+        self.assertLess(elapsed, 200)
+
+    def test_servers_that_close_get_the_whole_time(self):
+        for reply in (b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 2\r\n\r\nok",
+                      b"HTTP/1.0 200 OK\r\nContent-Length: 2\r\n\r\nok",
+                      b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nok\r\n0\r\n\r\n"):
+            (status, elapsed), seen = self.measure([reply])
+            self.assertEqual((status, len(seen)), (200, 1), reply)
+            self.assertGreaterEqual(elapsed, 240, reply)
+        (status, elapsed), seen = self.measure([b"HTTP/1.1 204 No Content\r\n\r\n"])   # promises, then hangs up
+        self.assertEqual(status, 204)
+        self.assertGreaterEqual(elapsed, 240)
+
+    def test_errors_and_rubbish(self):
+        (status, _), _ = self.measure([b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n"] * 2)
+        self.assertEqual(status, 503)
+        for rubbish in (b"SSH-2.0-OpenSSH\r\n\r\n", b"HTTP/1.1 abc\r\n\r\n", b""):
+            with self.assertRaises(OSError, msg=rubbish):
+                self.measure([rubbish])
+
+
+class ServerListTest(unittest.TestCase):
+    A = "socks5://u:p@10.0.0.1:1080"
+    B = f"vless://{LinkTest.ID}@example.com:443?security=tls#Frankfurt"
+
+    def add(self, cfg, url, name=None):
+        new, server_id = config.save_server(cfg, None, name, config.parse_proxy_url(url))
+        return config.validate(new), server_id
+
+    def test_first_server_is_used_and_more_can_follow(self):
+        cfg, first = self.add(config.defaults(), self.A)
+        self.assertEqual((first, cfg["active_server"], cfg["proxy"]["host"]), ("s1", "s1", "10.0.0.1"))
+        cfg, second = self.add(cfg, self.B, "Germany")
+        self.assertEqual((second, cfg["active_server"], cfg["proxy"]["host"]), ("s2", "s1", "10.0.0.1"))
+        self.assertEqual([config.server_name(server) for server in cfg["servers"]], ["10.0.0.1", "Germany"])
+        cfg = config.validate(config.select_server(cfg, second))
+        self.assertEqual((cfg["proxy"]["type"], cfg["proxy"]["host"]), ("vless", "example.com"))
+        self.assertEqual(config.validate(cfg), cfg)                       # stable under re-validation
+
+    def test_name_falls_back_to_the_link(self):
+        cfg, _ = self.add(config.defaults(), self.B)
+        self.assertEqual(config.server_name(cfg["servers"][0]), "Frankfurt")
+
+    def test_old_configuration_becomes_the_first_server(self):
+        old = {"proxy": {"type": "http", "host": "192.168.1.5", "port": 8080, "username": "", "password": ""},
+               "kill_switch": True}
+        cfg = config.validate(old)
+        self.assertEqual([(s["id"], s["proxy"]["host"]) for s in cfg["servers"]], [("s1", "192.168.1.5")])
+        self.assertEqual(cfg["active_server"], "s1")
+        self.assertEqual(config.validate(config.defaults())["servers"], [])
+
+    def test_set_proxy_edits_the_server_in_use(self):
+        cfg, _ = self.add(config.defaults(), self.A)
+        cfg, second = self.add(cfg, "http://10.0.0.2:8080")
+        cfg = config.validate(config.merge(cfg, {"proxy": {"port": 3128, "password": None}}))
+        self.assertEqual([(s["proxy"]["port"], s["proxy"]["password"]) for s in cfg["servers"]],
+                         [(3128, "p"), (8080, "")])
+        cfg = config.validate(config.select_server(cfg, second))
+        cfg = config.validate(config.merge(cfg, {"proxy": config.parse_proxy_url(self.B)}))
+        self.assertEqual([s["proxy"]["type"] for s in cfg["servers"]], ["socks5", "vless"])
+
+    def test_editing_keeps_secrets_unless_replaced(self):
+        cfg, first = self.add(config.defaults(), self.A)
+        new, _ = config.save_server(cfg, first, "Home", {"port": 1081, "password": None})
+        cfg = config.validate(new)
+        self.assertEqual((cfg["servers"][0]["name"], cfg["proxy"]["port"], cfg["proxy"]["password"]), ("Home", 1081, "p"))
+        view = config.public_view(cfg)
+        self.assertNotIn('"p"', json.dumps(view["servers"]))
+        self.assertEqual((view["servers"][0]["label"], view["servers"][0]["address"]), ("Home", "socks5://10.0.0.1:1081"))
+
+    def test_remove(self):
+        cfg, first = self.add(config.defaults(), self.A)
+        cfg, second = self.add(cfg, self.B)
+        cfg = config.validate(config.remove_server(cfg, second))
+        self.assertEqual((len(cfg["servers"]), cfg["active_server"]), (1, first))
+        cfg = config.validate(config.remove_server(cfg, first))
+        self.assertEqual((cfg["servers"], cfg["active_server"], cfg["proxy"]["host"]), ([], "", ""))
+        with self.assertRaises(config.ConfigError):
+            config.remove_server(cfg, "s9")
+        with self.assertRaises(config.ConfigError):
+            config.select_server(cfg, "s9")
+
+    def test_bad_entries_are_refused(self):
+        cfg, _ = self.add(config.defaults(), self.A)
+        for url in ("ssh://me@h.example", "hysteria2://x@h:1"):
+            with self.assertRaises(config.ConfigError, msg=url):
+                self.add(cfg, url)
+        with self.assertRaises(config.ConfigError):
+            config.validate(config.save_server(cfg, None, "empty", {"type": "socks5"})[0])
+        broken = dict(cfg, servers=cfg["servers"] + [dict(cfg["servers"][0])])           # the same id twice
+        with self.assertRaises(config.ConfigError):
+            config.validate(broken)
+        with self.assertRaises(config.ConfigError):
+            config.validate(dict(cfg, active_server="nope"))
+        with self.assertRaises(config.ConfigError):
+            config.validate(dict(cfg, servers=[{"id": "s1"}]))
+        self.assertEqual(len(config.validate(cfg)["servers"]), 1)
+
+    def test_helper_ports_are_a_guarded_range(self):
+        rules = firewall.render(47201, 47253, 0x5057, [], [], engine_port=47210, engine_ports=config.ENGINE_PORTS)
+        self.assertIn("tcp dport 47210-47219 meta mark != 0x5057 reject", rules)
+        for clash in ({"tcp_port": 47215}, {"dns_port": 47219}, {"engine_port": 65530}):
+            with self.assertRaises(config.ConfigError, msg=clash):
+                config.validate(clash)
 
 
 class CountryConfigTest(unittest.TestCase):

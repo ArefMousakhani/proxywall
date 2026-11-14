@@ -131,6 +131,68 @@ button.pw-rowbutton:disabled { opacity: 0.5; }
 
 .pw-tick { color: #ff6b6b; }
 
+.pw-divider { background-color: rgba(255, 255, 255, 0.07); }
+
+.pw-good { color: #2fd47f; }
+.pw-bad { color: #ff6b6b; }
+
+.pw-servers,
+.pw-servers row {
+    background-color: transparent;
+    color: #e8edf7;
+}
+
+.pw-servers row {
+    padding: 9px 8px;
+    border-radius: 10px;
+    border: 1px solid transparent;
+    margin: 1px 0;
+}
+
+.pw-servers row:hover { background-color: rgba(255, 255, 255, 0.06); }
+
+.pw-servers row.active {
+    background-color: rgba(47, 212, 127, 0.09);
+    border-color: rgba(47, 212, 127, 0.40);
+}
+
+button.pw-small,
+button.pw-danger {
+    background-color: rgba(255, 255, 255, 0.07);
+    background-image: none;
+    color: #c9d3e6;
+    border: 1px solid rgba(255, 255, 255, 0.10);
+    border-radius: 9px;
+    box-shadow: none;
+    text-shadow: none;
+    min-height: 30px;
+    padding: 0 12px;
+    font-size: 12.5px;
+    font-weight: 700;
+}
+
+button.pw-small:hover { background-color: rgba(255, 255, 255, 0.13); }
+button.pw-small:disabled { opacity: 0.45; }
+button.pw-small.pw-primary { background-color: #2f7bff; border-color: #2f7bff; color: #ffffff; min-height: 30px; }
+button.pw-small.pw-primary:hover { background-color: #4a8cff; }
+
+button.pw-danger { min-height: 42px; color: #ff8f8f; border-radius: 10px; padding: 0 18px; }
+button.pw-danger:hover { background-color: rgba(255, 107, 107, 0.18); }
+
+button.pw-icon {
+    background: none;
+    border: none;
+    box-shadow: none;
+    color: #8f9bb3;
+    min-width: 30px;
+    min-height: 30px;
+    padding: 0;
+    border-radius: 999px;
+    -gtk-icon-shadow: none;
+}
+
+button.pw-icon:hover { background-color: rgba(255, 255, 255, 0.10); color: #ffffff; }
+
 .pw-row-title {
     font-size: 14px;
     font-weight: 700;

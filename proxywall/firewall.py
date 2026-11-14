@@ -26,11 +26,12 @@ class FirewallError(Exception):
     pass
 
 
-def render(tcp_port, dns_port, mark, bypass4=(), bypass6=(), engine_port=0):
+def render(tcp_port, dns_port, mark, bypass4=(), bypass6=(), engine_port=0, engine_ports=1):
     """Return the complete rule set as nft script text (an atomic replace)."""
     # The helper process (Xray, ssh) listens on loopback for the daemon alone:
     # a program that talked to it directly would skip exclusions and the country gate.
-    engine_guard = (f"        tcp dport {engine_port} meta mark != {mark:#x} reject with tcp reset\n"
+    ports = f"{engine_port}-{engine_port + engine_ports - 1}" if engine_ports > 1 else str(engine_port)
+    engine_guard = (f"        tcp dport {ports} meta mark != {mark:#x} reject with tcp reset\n"
                     if engine_port else "")
 
     def address_set(name, kind, elements):

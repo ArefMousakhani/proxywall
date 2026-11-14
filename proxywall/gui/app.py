@@ -52,6 +52,8 @@ STATES = {
 }
 
 
+LEFT_WIDTH = 372            # the connection pane
+WINDOW_SIZE = (920, 720)
 TRAY_FLAG_STYLE = "v1"  # part of the cached file name: change it when the drawing changes
 
 
@@ -231,6 +233,106 @@ class FlagView(Gtk.DrawingArea):
         return False
 
 
+class ServerRow(Gtk.ListBoxRow):
+    """One saved server: a mark for the one in use, where it comes out, and what the last test found."""
+
+    def __init__(self, server_id, on_edit, on_test):
+        super().__init__()
+        self.server_id = server_id
+        self._active = False
+        box = Gtk.Box(spacing=10)
+        self.dot = Gtk.DrawingArea()
+        self.dot.set_size_request(16, 16)
+        self.dot.set_valign(Gtk.Align.CENTER)
+        self.dot.connect("draw", self._draw_dot)
+        box.pack_start(self.dot, False, False, 0)
+        self.flag = FlagView(24, 18)
+        box.pack_start(self.flag, False, False, 0)
+        text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        self.name = _label("", "pw-row-title")
+        self.name.set_ellipsize(Pango.EllipsizeMode.END)
+        self.address = _label("", "pw-key")
+        self.address.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+        text.pack_start(self.name, False, False, 0)
+        text.pack_start(self.address, False, False, 0)
+        box.pack_start(text, True, True, 0)
+        result = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        self.ping = _label("", "pw-value", 1.0)
+        self.reach = _label("", "pw-key", 1.0)
+        self.reach.set_ellipsize(Pango.EllipsizeMode.END)
+        self.reach.set_max_width_chars(22)
+        result.pack_start(self.ping, False, False, 0)
+        result.pack_start(self.reach, False, False, 0)
+        box.pack_start(result, False, False, 0)
+        for icon, tip, handler in (("view-refresh-symbolic", "Test this server", lambda *_: on_test([server_id])),
+                                   ("document-edit-symbolic", "Edit or delete", lambda *_: on_edit(server_id))):
+            button = Gtk.Button.new_from_icon_name(icon, Gtk.IconSize.MENU)
+            button.get_style_context().add_class("pw-icon")
+            button.set_tooltip_text(tip)
+            button.set_valign(Gtk.Align.CENTER)
+            button.connect("clicked", handler)
+            box.pack_start(button, False, False, 0)
+        self.add(box)
+        self.show_all()
+
+    def _draw_dot(self, area, cr):
+        width, height = area.get_allocated_width(), area.get_allocated_height()
+        cr.arc(width / 2, height / 2, 6, 0, 2 * math.pi)
+        if self._active:
+            cr.set_source_rgb(*GREEN)
+            cr.fill()
+        else:
+            cr.set_source_rgba(1, 1, 1, 0.28)
+            cr.set_line_width(1.5)
+            cr.stroke()
+        return False
+
+    @staticmethod
+    def _tone(label, tone):
+        context = label.get_style_context()
+        for name in ("pw-good", "pw-bad", "pw-dim"):
+            (context.add_class if name == tone else context.remove_class)(name)
+
+    def update(self, server, active, test, live):
+        """*test* is the last test result or None; *live* the status while this server carries the traffic."""
+        if active != self._active:
+            self._active = active
+            (self.get_style_context().add_class if active else self.get_style_context().remove_class)("active")
+            self.dot.queue_draw()
+        self.name.set_text(server["name"])
+        self.address.set_text(server["address"])
+        self.set_tooltip_text("In use" if active else "Click to use this server")
+        country = (live or {}).get("country") or (test or {}).get("country")
+        self.flag.set_country(country)
+        ping, ping_tone, reach, reach_tone, tip = "—", "pw-dim", "Not tested", None, None
+        if test and test["state"] != "done":
+            ping, reach = "…", "Testing…"
+        elif test:
+            tip = test.get("error")
+            if test["ping_ms"] is not None:
+                ping, ping_tone = f"{test['ping_ms']} ms", None
+            else:
+                ping, ping_tone = "No answer", "pw-bad"
+            if test["reach"]:
+                reach, reach_tone = f"Internet {test['reach_ms']} ms", "pw-good"
+            elif test["reach"] is False:
+                reach, reach_tone = "No internet", "pw-bad"
+            else:
+                reach, reach_tone = (test.get("error") or "Not tested"), ("pw-bad" if test.get("error") else None)
+        if live:  # what is being measured right now beats an older test
+            if live.get("latency_ms") is not None:
+                ping, ping_tone = f"{live['latency_ms']} ms", None
+            if live.get("internet_ok"):
+                reach, reach_tone, tip = f"Internet {live['internet_ms']} ms", "pw-good", None
+            elif live.get("internet_ok") is False:
+                reach, reach_tone = "No internet", "pw-bad"
+        self.ping.set_text(ping)
+        self._tone(self.ping, ping_tone)
+        self.reach.set_text(reach)
+        self._tone(self.reach, reach_tone)
+        self.reach.set_tooltip_text(tip)
+
+
 class Worker:
     """Runs blocking calls to the service off the UI thread, strictly in order."""
 
@@ -256,7 +358,7 @@ class Worker:
 class PowerButton(Gtk.Button):
     """The one big control. Drawn by hand so it can glow and animate."""
 
-    SIZE = 150
+    SIZE = 140
 
     def __init__(self):
         super().__init__()
@@ -391,6 +493,9 @@ class Panel:
         self._last_stats = None
         self._password_dirty = False
         self._loading = False
+        self._rows = {}                # server id -> ServerRow
+        self._row_order = None         # ids as last drawn, to notice when the list changes
+        self._editing = None           # id of the server in the form; None while adding one
 
         self.header = Gtk.HeaderBar()
         self.header.set_show_close_button(True)
@@ -411,9 +516,24 @@ class Panel:
         self.stack = Gtk.Stack()
         self.stack.set_transition_type(Gtk.StackTransitionType.SLIDE_LEFT_RIGHT)
         self.stack.set_transition_duration(180)
-        self.stack.add_named(self._build_main(), "main")
+        self.stack.add_named(self._build_servers(), "servers")
+        self.stack.add_named(self._build_server_form(), "server")
         self.stack.add_named(self._build_settings(), "settings")
         self.stack.add_named(self._build_countries(), "countries")
+        self.stack.set_hexpand(True)
+
+        # Two panes: the connection on the left, always in view; servers and settings on the right.
+        left = Gtk.ScrolledWindow()
+        left.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        left.set_size_request(LEFT_WIDTH, -1)
+        left.add(self._build_main())
+        divider = Gtk.Box()
+        divider.get_style_context().add_class("pw-divider")
+        divider.set_size_request(1, -1)
+        self.root = Gtk.Box()
+        self.root.pack_start(left, False, False, 0)
+        self.root.pack_start(divider, False, False, 0)
+        self.root.pack_start(self.stack, True, True, 0)
         self.render_stopped()
 
     # ------------------------------------------------------------ main page
@@ -437,7 +557,7 @@ class Panel:
         page.pack_start(self.error_label, False, False, 0)
 
         location = _card()
-        location.set_margin_top(18)
+        location.set_margin_top(14)
         self.map = WorldMap()
         location.pack_start(self.map, False, False, 0)
         row = Gtk.Box(spacing=8)
@@ -454,7 +574,8 @@ class Panel:
         info = _card()
         info.set_margin_top(12)
         self.values = {}
-        for key, title in (("proxy", "Proxy"), ("ip", "IP address"), ("latency", "Latency")):
+        for key, title in (("proxy", "Server"), ("ip", "IP address"), ("latency", "Server latency"),
+                           ("internet", "Internet")):
             row = Gtk.Box(spacing=12)
             row.pack_start(_label(title, "pw-key"), False, False, 0)
             value = _label("—", "pw-value", 1.0, selectable=True)
@@ -484,8 +605,135 @@ class Panel:
         page.pack_end(self.footer, False, False, 0)
         return page
 
-    # ------------------------------------------------------------ settings page
-    def _build_settings(self):
+    # ------------------------------------------------------------ servers page
+    def _build_servers(self):
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        page.set_border_width(20)
+        bar = Gtk.Box(spacing=8)
+        bar.pack_start(_label("SERVERS", "pw-section"), True, True, 0)
+
+        def small(text, tip, handler, primary=False):
+            button = Gtk.Button(label=text)
+            button.get_style_context().add_class("pw-small")
+            if primary:
+                button.get_style_context().add_class("pw-primary")
+            button.set_tooltip_text(tip)
+            button.connect("clicked", handler)
+            bar.pack_start(button, False, False, 0)
+            return button
+
+        self.paste_button = small("Paste links", "Add every server link that is on the clipboard", self._paste_links)
+        self.test_button = small("Test all", "Measure every server: ping, and whether it reaches the internet",
+                                 lambda *_: self._test_servers(None))
+        small("Add", "Add a server", lambda *_: self.show_server_form(None), primary=True)
+        page.pack_start(bar, False, False, 0)
+
+        self.servers_note = _label("", "pw-key", wrap=True)
+        self.servers_note.set_no_show_all(True)
+        page.pack_start(self.servers_note, False, False, 0)
+
+        frame = Gtk.Box()
+        frame.get_style_context().add_class("pw-textframe")
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        self.server_list = Gtk.ListBox()
+        self.server_list.get_style_context().add_class("pw-servers")
+        self.server_list.set_selection_mode(Gtk.SelectionMode.NONE)
+        self.server_list.set_activate_on_single_click(True)
+        self.server_list.connect("row-activated", self._on_server_row)
+        self.server_list.get_accessible().set_name("Servers")
+        empty = _label("No servers yet.\nAdd one, or copy share links and press “Paste links”.", "pw-key", 0.5)
+        empty.set_justify(Gtk.Justification.CENTER)
+        empty.set_margin_top(60)
+        empty.show()
+        self.server_list.set_placeholder(empty)
+        scroller.add(self.server_list)
+        frame.pack_start(scroller, True, True, 0)
+        page.pack_start(frame, True, True, 0)
+        page.pack_start(_label("Click a server to use it. A test measures the server itself (ping) and a small "
+                               "page fetched through it (internet).", "pw-key", wrap=True), False, False, 0)
+        return page
+
+    def _note(self, text):
+        self.servers_note.set_text(text or "")
+        self.servers_note.set_visible(bool(text))
+
+    def _render_servers(self, status):
+        servers = status.get("servers") or []
+        tests = status.get("tests") or {}
+        order = [server["id"] for server in servers]
+        if order != self._row_order:
+            for row in self.server_list.get_children():
+                self.server_list.remove(row)
+            self._rows = {}
+            for server in servers:
+                row = ServerRow(server["id"], self.show_server_form, self._test_servers)
+                self._rows[server["id"]] = row
+                self.server_list.add(row)
+            self._row_order = order
+        active = status.get("active_server")
+        connected = status["state"] == "connected"
+        for server in servers:
+            live = status if (connected and server["id"] == active) else None
+            self._rows[server["id"]].update(server, server["id"] == active, tests.get(server["id"]), live)
+        self.test_button.set_sensitive(bool(servers))
+
+    def _on_server_row(self, _list, row):
+        if self.status is None or row.server_id == self.status.get("active_server"):
+            return
+        server_id = row.server_id
+        self.worker.submit(lambda client: client.server_select(server_id), self._after_action)
+
+    def _test_servers(self, ids):
+        self._note("")
+        self.worker.submit(lambda client: client.server_test(ids), self._after_action)
+
+    def _paste_links(self, _button):
+        text = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).wait_for_text() or ""
+        proxies, skipped = [], 0
+        for line in text.replace("\r", "\n").split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                if "://" not in line:
+                    raise config.ConfigError("not a link")
+                proxies.append(config.parse_proxy_url(line))
+            except config.ConfigError:
+                skipped += 1
+        if not proxies:
+            self._note("The clipboard holds no server links. Copy one or more links "
+                       "(vless://, vmess://, trojan://, ss://, socks5://, http://) and try again.")
+            return
+
+        def add_all(client):
+            added = 0
+            for proxy in proxies:
+                try:
+                    client.server_save(None, None, proxy)
+                    added += 1
+                except DaemonUnavailable:
+                    raise
+                except Exception:
+                    pass
+            return added
+
+        def done(added, error):
+            rejected = skipped + len(proxies) - (added or 0)
+            if error is not None:
+                self._note("The service is not running" if isinstance(error, DaemonUnavailable) else str(error))
+            else:
+                self._note(f"Added {added} server{'s' if added != 1 else ''}"
+                           + (f"; {rejected} line{'s' if rejected != 1 else ''} could not be used" if rejected else "")
+                           + ".")
+            self._polling = False
+            self.poll()
+            return False
+
+        self.worker.submit(add_all, done)
+
+    # ------------------------------------------------------------ server form
+    def _build_server_form(self):
         page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         page.set_border_width(20)
 
@@ -494,7 +742,11 @@ class Panel:
             label.set_margin_top(top)
             page.pack_start(label, False, False, 0)
 
-        section("PROXY", 0)
+        section("NAME", 0)
+        self.server_name = Gtk.Entry(placeholder_text="Name (optional)", max_length=60)
+        page.pack_start(self.server_name, False, False, 0)
+
+        section("SERVER")
         segment = Gtk.Box()
         segment.get_style_context().add_class("pw-seg")
         self.type_socks = Gtk.RadioButton.new_with_label(None, "SOCKS5")
@@ -550,6 +802,7 @@ class Panel:
         self.key_button.add(self.key_label)
         self.key_button.connect("clicked", self._choose_key)
         self.key_row.pack_start(self.key_button, True, True, 0)
+        self.key_button.show_all()  # the row itself is shown and hidden with the SSH tab
         self.key_clear = Gtk.Button.new_from_icon_name("edit-clear-symbolic", Gtk.IconSize.MENU)
         self.key_clear.get_style_context().add_class("pw-rowbutton")
         self.key_clear.set_tooltip_text("Do not use a private key")
@@ -560,7 +813,136 @@ class Panel:
         self._key_saved = False
         self._link_saved = ""    # description of the link the service has, if any
 
-        section("BYPASS THE PROXY")
+
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroller.add(page)
+        bottom = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        bottom.set_border_width(20)
+        bottom.set_margin_top(-8)
+        self.server_error = _label("", "pw-error", wrap=True, selectable=True)
+        self.server_error.set_no_show_all(True)
+        bottom.pack_start(self.server_error, False, False, 0)
+        buttons = Gtk.Box(spacing=8)
+        self.server_delete = Gtk.Button(label="Delete")
+        self.server_delete.get_style_context().add_class("pw-danger")
+        self.server_delete.set_no_show_all(True)
+        self.server_delete.connect("clicked", self._on_server_delete)
+        buttons.pack_start(self.server_delete, False, False, 0)
+        self.server_save = Gtk.Button(label="Save")
+        self.server_save.get_style_context().add_class("pw-primary")
+        self.server_save.connect("clicked", self._on_server_save)
+        buttons.pack_start(self.server_save, True, True, 0)
+        bottom.pack_start(buttons, False, False, 0)
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        outer.pack_start(scroller, True, True, 0)
+        outer.pack_start(bottom, False, False, 0)
+        return outer
+
+    def _server_message(self, lines):
+        self.server_error.set_text("\n".join(lines))
+        self.server_error.set_visible(bool(lines))
+
+    def show_server_form(self, server_id):
+        """Open the form: for one saved server, or empty (None) to add one."""
+        self._editing = server_id
+        self._server_message([])
+        self.server_save.set_sensitive(False)
+        self.server_delete.set_visible(server_id is not None)
+        self.stack.set_visible_child_name("server")
+        self.gear.hide()
+        self.back.show()
+        self.title.set_text("EDIT SERVER" if server_id else "ADD SERVER")
+        self.worker.submit(lambda client: client.get_config(), self._fill_server)
+
+    def _fill_server(self, cfg, error):
+        if error is not None:
+            self._server_message(["The service is not running" if isinstance(error, DaemonUnavailable)
+                                  else str(error)])
+            return False
+        server = next((item for item in cfg.get("servers", []) if item["id"] == self._editing), None)
+        if self._editing is not None and server is None:
+            self.show_main()
+            return False
+        proxy = server["proxy"] if server else {"type": "socks5", "host": "", "port": 1080, "username": ""}
+        self._loading = True
+        self.server_name.set_text(server["name"] if server else "")
+        by_link = proxy["type"] in links.ENGINE_KINDS
+        self._type_button("link" if by_link else proxy["type"]).set_active(True)
+        self.host.set_text("" if by_link else proxy["host"])
+        self.port.set_text("" if by_link else str(proxy["port"]))
+        self.username.set_text(proxy["username"])
+        self.link.set_text("")
+        self._link_saved = ""
+        if by_link and proxy.get("link_set"):
+            self._link_saved = " · ".join(part for part in (
+                proxy["type"].upper(), f"{proxy['host']}:{proxy['port']}", proxy.get("name")) if part)
+        self._key, self._key_saved = None, bool(proxy.get("key_set"))
+        self.password.set_text("")
+        self.password.set_visibility(False)
+        self.password.set_placeholder_text(
+            "Password saved — type to replace" if proxy.get("password_set") else "Password (optional)")
+        self._password_dirty = False
+        self._on_type_changed()
+        self._loading = False
+        self.server_save.set_sensitive(True)
+        return False
+
+    def _on_server_save(self, _button):
+        self._split_host()
+        username = self.username.get_text().strip()
+        password = self.password.get_text() if self._password_dirty else None
+        if not username:
+            password = ""
+        port = self.port.get_text().strip()
+        kind = self._proxy_type()
+        if kind == "link":
+            # Nothing typed means "keep the link the service already has".
+            proxy = {"type": "link", "link": self.link.get_text().strip() or None}
+        else:
+            proxy = {
+                "type": kind,
+                "host": self.host.get_text().strip(),
+                "port": int(port) if port.isdigit() else (port or {"http": 8080, "ssh": 22}.get(kind, 1080)),
+                "username": username,
+                "password": password,
+            }
+            if kind == "ssh":
+                proxy["private_key"] = self._key
+        server_id, name = self._editing, self.server_name.get_text().strip()
+        self.server_save.set_sensitive(False)
+        self._server_message([])
+        self.worker.submit(lambda client: client.server_save(server_id, name, proxy), self._after_server_change)
+
+    def _on_server_delete(self, _button):
+        server_id = self._editing
+        self._server_message([])
+        self.worker.submit(lambda client: client.server_remove(server_id), self._after_server_change)
+
+    def _after_server_change(self, _result, error):
+        self.server_save.set_sensitive(True)
+        if error is not None:
+            if isinstance(error, DaemonUnavailable):
+                self._server_message(["The service is not running"])
+            else:
+                self._server_message([m[:1].upper() + m[1:] for m in getattr(error, "errors", None) or [str(error)]])
+            return False
+        self.show_main()
+        self._polling = False
+        self.poll()
+        return False
+
+    # ------------------------------------------------------------ settings page
+    def _build_settings(self):
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        page.set_border_width(20)
+
+        def section(title, top=14):
+            label = _label(title, "pw-section")
+            label.set_margin_top(top)
+            page.pack_start(label, False, False, 0)
+
+        section("BYPASS THE PROXY", 0)
         frame = Gtk.Box()
         frame.get_style_context().add_class("pw-textframe")
         scroller = Gtk.ScrolledWindow()
@@ -746,7 +1128,7 @@ class Panel:
 
     # ------------------------------------------------------------ navigation
     def show_main(self):
-        self.stack.set_visible_child_name("main")
+        self.stack.set_visible_child_name("servers")
         self.back.hide()
         self.gear.show()
         self.title.set_text(APP_NAME.upper())
@@ -781,6 +1163,7 @@ class Panel:
         self._apply_state("stopped", detail=detail)
         for value in self.values.values():
             value.set_text("—")
+        self._render_servers({"state": "stopped"})
         self._render_location({}, "stopped")
         self.kill_switch.set_sensitive(False)
         self.footer.set_text("")
@@ -790,19 +1173,34 @@ class Panel:
         state = status["state"] if status["state"] in STATES else "error"
         explanation = None
         if state == "disconnected" and not status["proxy_configured"]:
-            explanation = "Add your proxy in settings to get started"
+            explanation = "Add a server to get started"
         elif state == "connecting":
             explanation = f"Reaching {status['proxy']}…"
         detail = status.get("error") if state in ("unreachable", "error", "country_blocked", "checking") else None
         self._apply_state(state, explanation, detail)
 
-        self.values["proxy"].set_text(status["proxy"] or "Not set")
+        active = next((server for server in status.get("servers") or []
+                       if server["id"] == status.get("active_server")), None)
+        self.values["proxy"].set_text((active["name"] if active else status["proxy"]) or "Not set")
+        self.values["proxy"].set_tooltip_text(status["proxy"] or None)
         ip = status.get("public_ip")
         if ip and status.get("country"):
             ip = f"{ip}  ·  {status['country']}"
         self.values["ip"].set_text(ip or "—")
         latency = status.get("latency_ms")
         self.values["latency"].set_text(f"{latency} ms" if latency is not None and state == "connected" else "—")
+        internet = "—"
+        if state == "connected" and status.get("internet_ok"):
+            internet = f"{status['internet_ms']} ms"
+        elif state == "connected" and status.get("internet_ok") is False:
+            internet = "No answer"
+        self.values["internet"].set_text(internet)
+        self.values["internet"].set_tooltip_text(
+            f"Round trip to {status.get('test_host') or 'the test page'} through the server, "
+            "measured every 30 seconds")
+        context = self.values["internet"].get_style_context()
+        (context.add_class if internet == "No answer" else context.remove_class)("pw-bad")
+        self._render_servers(status)
         self._render_location(status, state)
 
         blocked = status.get("blocked_countries") or []
@@ -881,7 +1279,11 @@ class Panel:
         if status is None or self._busy:
             return
         if not status["proxy_configured"]:
-            self.show_settings()
+            if status.get("servers"):
+                self.show_main()
+                self._note("Click a server in the list to use it, then connect.")
+            else:
+                self.show_server_form(None)
             return
         self.toggle()
 
@@ -914,23 +1316,6 @@ class Panel:
                                     else str(error)])
             return False
         self._loading = True
-        proxy = cfg["proxy"]
-        by_link = proxy["type"] in links.ENGINE_KINDS
-        self._type_button("link" if by_link else proxy["type"]).set_active(True)
-        self.host.set_text("" if by_link else proxy["host"])
-        self.port.set_text("" if by_link else str(proxy["port"]))
-        self.username.set_text(proxy["username"])
-        self.link.set_text("")
-        self._link_saved = ""
-        if by_link and proxy.get("link_set"):
-            self._link_saved = " · ".join(part for part in (
-                proxy["type"].upper(), f"{proxy['host']}:{proxy['port']}", proxy.get("name")) if part)
-        self._key, self._key_saved = None, bool(proxy.get("key_set"))
-        self.password.set_text("")
-        self.password.set_visibility(False)
-        self.password.set_placeholder_text(
-            "Password saved — type to replace" if proxy.get("password_set") else "Password (optional)")
-        self._password_dirty = False
         buffer = self.exclude.get_buffer()
         buffer.set_text("\n".join(cfg["exclude"]))
         buffer.place_cursor(buffer.get_start_iter())
@@ -940,7 +1325,6 @@ class Panel:
         self._show_blocked()
         self.allow_lan.set_active(cfg["allow_lan"])
         self.autostart.set_active(os.path.exists(AUTOSTART_FILE))
-        self._on_type_changed()
         self._loading = False
         self.save.set_sensitive(True)
         return False
@@ -1019,9 +1403,9 @@ class Panel:
                 if "PRIVATE KEY-----" not in text or len(text) > 20000:
                     raise ValueError("that file is not a private key")
                 self._set_key(text)
-                self._settings_message([])
+                self._server_message([])
             except (OSError, ValueError) as exc:
-                self._settings_message([f"Could not use that file: {exc}"])
+                self._server_message([f"Could not use that file: {exc}"])
         dialog.destroy()
 
     def _on_password_changed(self, _entry):
@@ -1065,30 +1449,9 @@ class Panel:
         self.settings_error.set_visible(bool(lines))
 
     def _on_save(self, _button):
-        self._split_host()
         buffer = self.exclude.get_buffer()
         text = buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), False)
-        username = self.username.get_text().strip()
-        password = self.password.get_text() if self._password_dirty else None
-        if not username:
-            password = ""
-        port = self.port.get_text().strip()
-        kind = self._proxy_type()
-        if kind == "link":
-            # Nothing typed means "keep the link the service already has".
-            proxy = {"type": "link", "link": self.link.get_text().strip() or None}
-        else:
-            proxy = {
-                "type": kind,
-                "host": self.host.get_text().strip(),
-                "port": int(port) if port.isdigit() else (port or {"http": 8080, "ssh": 22}.get(kind, 1080)),
-                "username": username,
-                "password": password,
-            }
-            if kind == "ssh":
-                proxy["private_key"] = self._key
         patch = {
-            "proxy": proxy,
             "exclude": [line.strip() for line in text.replace(",", "\n").splitlines() if line.strip()],
             "allow_lan": self.allow_lan.get_active(),
         }
@@ -1238,14 +1601,14 @@ class Application(Gtk.Application):
         self.window = Gtk.ApplicationWindow(application=self, title=APP_NAME)
         self.window.get_style_context().add_class("pw-root")
         self.window.set_titlebar(self.panel.header)
-        self.window.add(self.panel.stack)
-        self.window.set_default_size(372, 716)
-        self.window.set_resizable(False)
+        self.window.add(self.panel.root)
+        self.window.set_default_size(WINDOW_SIZE[0], WINDOW_SIZE[1])
+        self.window.set_size_request(760, 560)
         self.window.set_position(Gtk.WindowPosition.CENTER)
         self.window.connect("delete-event", self._on_close)
         self.window.connect("key-press-event", self._on_key)
         self.panel.header.show_all()
-        self.panel.stack.show_all()
+        self.panel.root.show_all()
 
         self.tray = Tray(self)
         if self.tray.available:
@@ -1279,7 +1642,7 @@ class Application(Gtk.Application):
         return False
 
     def _on_key(self, _window, event):
-        if event.keyval == Gdk.KEY_Escape and self.panel.stack.get_visible_child_name() != "main":
+        if event.keyval == Gdk.KEY_Escape and self.panel.stack.get_visible_child_name() != "servers":
             self.panel.go_back()
             return True
         return False

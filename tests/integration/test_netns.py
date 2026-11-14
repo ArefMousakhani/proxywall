@@ -831,6 +831,138 @@ class NetnsTest(unittest.TestCase):
         unmarked = through_pipe("0")
         self.assertNotIn(HOST_IP.encode(), unmarked.stdout)     # captured like any other program
 
+    # ------------------------------------------------------------ several servers
+    def wait_tests(self, ids, timeout=60.0):
+        def done():
+            tests = self.client.status()["tests"]
+            return all(tests.get(server, {}).get("state") == "done" for server in ids)
+        self.wait_for(done, "the server tests to finish", timeout)
+        return self.client.status()["tests"]
+
+    def fresh_servers(self, **extra):
+        """Start from an empty list (the suite has collected one server by now)."""
+        self.client.disconnect()
+        self.configure(kill_switch=False, blocked_countries=[], ip_check_url="")
+        for server in self.client.status()["servers"]:
+            self.client.server_remove(server["id"])
+        self.configure(exclude=["*.ir"], allow_lan=True, geo_url="", country_check_seconds=5,
+                       test_url="http://www.example.com/", **extra)
+
+    def test_50_choose_between_saved_servers(self):
+        self.fresh_servers()
+        socks = self.client.server_save(None, "by socks", config.parse_proxy_url("socks5://10.0.0.1:1080"))
+        http = self.client.server_save(None, "by http", config.parse_proxy_url("http://10.0.0.1:8080"))
+        status = self.client.status()
+        self.assertEqual([s["name"] for s in status["servers"]], ["by socks", "by http"])
+        self.assertEqual(status["active_server"], socks)              # the first one added is the one in use
+        self.client.connect()
+        self.wait_state("connected")
+        _, log = self.assert_proxied("www.example.com")
+        self.assertIn("socks www.example.com:80", log)
+        held = socket.create_connection(("www.example.com", 80), timeout=5)
+        self.addCleanup(held.close)
+
+        self.client.server_select(http)                               # while connected: traffic moves over
+        self.wait_state("connected")
+        _, log = self.assert_proxied("www.example.com")
+        self.assertIn("httpproxy www.example.com:80", log)
+        try:                                                          # what ran through the old server was cut
+            held.sendall(b"GET / HTTP/1.1\r\nHost: www.example.com\r\nConnection: close\r\n\r\n")
+            self.assertEqual(held.recv(100), b"")
+        except OSError:
+            pass
+        with self.assertRaises(DaemonError):                          # not while it carries the traffic
+            self.client.server_remove(http)
+        self.client.server_remove(socks)
+        self.assertEqual([s["id"] for s in self.client.status()["servers"]], [http])
+        self.assert_proxied("www.example.com")
+
+    def test_51_test_measures_every_server_without_using_it(self):
+        self.fresh_servers(ip_check_url=self.TRACE)
+        self.set_exit_country("DE")
+        good = self.client.server_save(None, "good", config.parse_proxy_url("socks5://10.0.0.1:1080"))
+        other = self.client.server_save(None, "other", config.parse_proxy_url("http://10.0.0.1:8080"))
+        dead = self.client.server_save(None, "dead", config.parse_proxy_url("socks5://10.0.0.1:1099"))
+        ids = [good, other, dead]
+        if XRAY:
+            self.start_xray_server()
+            ids.append(self.client.server_save(None, None, config.parse_proxy_url(self.share_links()["vless"])))
+            ids.append(self.client.server_save(None, "wrong id", config.parse_proxy_url(
+                self.share_links()["vless"].replace(UUID, "11111111-2222-3333-4444-555555555555"))))
+        self.assertEqual(self.state(), "disconnected")
+        self.assertEqual(self.client.server_test(), len(ids))
+        tests = self.wait_tests(ids)
+        for server in (good, other) + ((ids[3],) if XRAY else ()):
+            result = tests[server]
+            self.assertTrue(result["reach"], result)
+            self.assertGreater(result["ping_ms"], 0)
+            self.assertGreater(result["reach_ms"], 0)
+            self.assertEqual((result["country"], result["error"]), ("DE", None))
+        self.assertEqual((tests[dead]["ping_ms"], tests[dead]["reach"]), (None, None))
+        self.assertIn("does not answer", tests[dead]["error"])
+        if XRAY:
+            wrong = tests[ids[4]]
+            self.assertIsNotNone(wrong["ping_ms"])                    # the machine is there...
+            self.assertIs(wrong["reach"], False)                      # ...but nothing comes back through it
+        self.assertEqual(self.state(), "disconnected")                # testing connects nothing
+        self.assertEqual(self.client.status()["active_server"], good)
+
+    def test_52_tests_work_behind_the_kill_switch_and_respect_blocked_countries(self):
+        self.fresh_servers(ip_check_url=self.TRACE)
+        first = self.client.server_save(None, "one", config.parse_proxy_url("socks5://10.0.0.1:1080"))
+        self.configure(kill_switch=True, allow_lan=False)             # everything is blocked, the server is not "local"
+        self.wait_state("blocked")
+        self.assert_blocked("www.example.com")
+        self.set_exit_country("DE")
+        self.client.server_test([first])
+        self.assertTrue(self.wait_tests([first])[first]["reach"])     # the daemon's own, marked connections
+        self.assert_blocked("www.example.com")                        # and still nothing for anybody else
+
+        self.set_exit_country("IR")
+        self.configure(blocked_countries=["IR"])
+        mark = self.mark()
+        self.client.server_test([first])
+        result = self.wait_tests([first])[first]
+        self.assertEqual((result["country"], result["reach"]), ("IR", None))
+        self.assertIn("Iran", result["error"])
+        self.assertEqual([line for line in self.since(mark) if line.startswith("http ")], [],
+                         "the test page was fetched from a blocked country")
+
+    def test_53_internet_latency_is_reported_while_connected(self):
+        self.fresh_servers()
+        self.client.server_save(None, "one", config.parse_proxy_url("socks5://10.0.0.1:1080"))
+        self.client.connect()
+        self.wait_state("connected")
+        self.wait_for(lambda: self.client.status()["internet_ok"] is not None, "the internet check", 20)
+        status = self.client.status()
+        self.assertTrue(status["internet_ok"])
+        self.assertGreater(status["internet_ms"], 0)
+        self.assertEqual(status["test_host"], "www.example.com")
+        self.configure(test_url="http://www.example.com:81/")         # nothing listens there
+        self.wait_for(lambda: self.client.status()["internet_ok"] is False, "the failed internet check", 25)
+        self.assertEqual(self.state(), "connected")                   # a slow test page is not a dead proxy
+        self.assert_proxied("www.example.com")
+
+    def test_54_helper_ports_are_closed_to_other_programs(self):
+        self.reset()
+        first = self.client.get_config()["engine_port"]
+        listeners = []
+        for port in (first, first + 9):
+            listener = socket.socket()
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            listener.bind(("127.0.0.1", port))
+            listener.listen(1)
+            listeners.append(listener)
+            self.addCleanup(listener.close)
+            with self.assertRaises(OSError):
+                socket.create_connection(("127.0.0.1", port), timeout=3).close()
+        outside = socket.socket()
+        outside.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        outside.bind(("127.0.0.1", first + 10))
+        outside.listen(1)
+        self.addCleanup(outside.close)
+        socket.create_connection(("127.0.0.1", first + 10), timeout=3).close()   # just past the range: untouched
+
     def test_99_final_disconnect_cleans_up(self):
         self.configure(kill_switch=False)
         self.client.disconnect()

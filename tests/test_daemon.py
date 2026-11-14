@@ -132,11 +132,50 @@ class DaemonTest(unittest.TestCase):
         self.assertIn(self.client.status()["state"], ("connecting", "unreachable"))
         self.client.disconnect()
 
+    def test_8_saved_servers(self):
+        for server in self.client.status()["servers"]:
+            self.client.server_remove(server["id"])
+        self.assertFalse(self.client.status()["proxy_configured"])
+        first = self.client.server_save(None, "one", {"type": "socks5", "host": "127.0.0.1", "port": 9})
+        self.assertEqual(self.cli("server", "add", "http://127.0.0.1:10", "--name", "two").returncode, 0)
+        status = self.client.status()
+        self.assertEqual([s["name"] for s in status["servers"]], ["one", "two"])
+        self.assertEqual((status["active_server"], status["proxy"]), (first, "socks5://127.0.0.1:9"))
+        listing = self.cli("server", "use", "two").stdout
+        self.assertRegex(listing, r"\*\s+2\s+two\s+http://127\.0\.0\.1:10")
+        self.assertEqual(self.client.status()["proxy"], "http://127.0.0.1:10")
+        with self.assertRaises(DaemonError):
+            self.client.server_save(None, "bad", {"type": "socks5", "host": "", "port": 1})
+        with self.assertRaises(DaemonError):
+            self.client.server_select("nope")
+        self.assertEqual(self.client.request("server_test", ids=["zzz"])["started"], 0)
+        with self.assertRaises(DaemonError):
+            self.client.request("server_test", ids="s1")
+
+        tested = self.cli("server", "test", "one")               # nothing listens on port 9
+        self.assertIn("does not answer", tested.stdout)
+        result = self.client.status()["tests"][first]
+        self.assertEqual((result["state"], result["ping_ms"], result["reach"]), ("done", None, None))
+        self.client.server_save(first, None, {"port": 11})       # an edited server has not been tested
+        self.assertNotIn(first, self.client.status()["tests"])
+
+        self.stop()                                              # the list is kept across restarts
+        self.start()
+        self.assertEqual([s["name"] for s in self.client.status()["servers"]], ["one", "two"])
+        self.assertEqual(self.cli("server", "remove", "1").returncode, 0)
+        self.assertEqual([s["name"] for s in self.client.status()["servers"]], ["two"])
+        self.client.connect()
+        with self.assertRaises(DaemonError):                     # not the one carrying the traffic
+            self.client.server_remove(self.client.status()["active_server"])
+        self.client.disconnect()
+
     def test_7_garbage_on_the_socket_is_survived(self):
         with socket.socket(socket.AF_UNIX) as sock:
             sock.connect(self.client.path)
             sock.sendall(b"\x00\xff not json\n[1,2]\n")
-            replies = sock.makefile().readline(), sock.makefile().readline()
+            sock.settimeout(10)
+            reader = sock.makefile()     # one reader: a second one could find its line already taken
+            replies = reader.readline(), reader.readline()
         self.assertTrue(all('"ok": false' in r for r in replies))
         self.assertEqual(self.client.status()["state"], "disconnected")
 

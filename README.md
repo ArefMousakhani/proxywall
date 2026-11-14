@@ -11,16 +11,12 @@
 ProxyWall turns a plain proxy (`192.168.1.5:1080`, a proxy shared from your phone, an SSH tunnel, a V2Ray / Xray / sing-box / Shadowsocks local port, a corporate HTTP proxy…) into something that behaves like an always-on VPN client: every application is captured, DNS cannot leak, and a firewall kill switch keeps the machine closed whenever the proxy is unreachable. There is no "fall back to a direct connection".
 
 <p align="center">
-  <img src="docs/images/connected.png" width="240" alt="ProxyWall connected: all traffic goes through the SOCKS5 proxy">
-  <img src="docs/images/unreachable.png" width="240" alt="ProxyWall kill switch: proxy unreachable, traffic is blocked">
-  <img src="docs/images/settings.png" width="240" alt="ProxyWall settings: proxy address and bypass list">
+  <img src="docs/images/connected.png" width="760" alt="ProxyWall connected: status, map of the exit location, and the list of saved servers with ping and internet test results">
 </p>
 <p align="center">
-  <img src="docs/images/country-blocked.png" width="240" alt="ProxyWall blocking all traffic because the proxy comes out in a blocked country">
-  <img src="docs/images/countries.png" width="240" alt="ProxyWall country list with flags: choose the countries to block">
-  <img src="docs/images/settings-link.png" width="240" alt="ProxyWall settings: SOCKS5, HTTP, SSH or a VLESS / VMess / Trojan / Shadowsocks share link">
+  <img src="docs/images/country-blocked.png" width="375" alt="ProxyWall blocking all traffic because the server comes out in a blocked country">
+  <img src="docs/images/server-link.png" width="375" alt="ProxyWall server form: SOCKS5, HTTP, SSH or a VLESS / VMess / Trojan / Shadowsocks share link">
 </p>
-
 <p align="center">
   <img src="docs/images/tray.png" width="190" alt="ProxyWall tray icon: the flag of the country your traffic comes out in, with a green frame">
   <br><sub>While connected, the tray icon is the flag of the country your traffic comes out in.</sub>
@@ -59,6 +55,9 @@ ProxyWall fixes all five with one switch.
 - **Small and auditable.** Pure Python standard library plus `nftables`; no bundled binaries. The privileged service runs with a single capability inside a systemd sandbox.
 - **Block exit countries.** Pick the countries your traffic must never come out in. Nothing is sent until the exit has been checked, and if the proxy starts coming out in one of them (or its country cannot be checked), everything is blocked at once.
 - **See where you come out.** The window shows the country flag, city, a small world map and the coordinates of your public IP; the tray icon turns into that country's flag while you are connected.
+- **Many servers, one click.** Save as many servers as you like (paste a whole list of links at once), click the one to use, and switch while connected.
+- **Test before you use.** For every saved server: ping to the server, and whether a small page (Google's by default) can be fetched through it, with the time it took. Nothing is connected or switched by a test.
+- **Two latencies while connected:** to the server, and through it to the internet.
 - **Desktop app, tray icon and CLI.**
 
 ## Install
@@ -68,7 +67,7 @@ Requirements: a systemd-based distribution with Python ≥ 3.10, `nftables` and 
 **From a release (Debian, Ubuntu, Linux Mint):** download `proxywall_<version>_all.deb` from the [latest release](https://github.com/ArefMousakhani/proxywall/releases/latest), then
 
 ```sh
-sudo apt install ./proxywall_1.2.0_all.deb
+sudo apt install ./proxywall_1.3.0_all.deb
 ```
 
 **From source:**
@@ -77,7 +76,7 @@ sudo apt install ./proxywall_1.2.0_all.deb
 git clone https://github.com/ArefMousakhani/proxywall.git
 cd proxywall
 make deb
-sudo apt install ./dist/proxywall_1.2.0_all.deb
+sudo apt install ./dist/proxywall_1.3.0_all.deb
 ```
 
 `apt` pulls in the few dependencies (`python3-gi`, `nftables`, …), starts the `proxywall` service and adds **ProxyWall** to the application menu (*Internet* category).
@@ -85,11 +84,29 @@ sudo apt install ./dist/proxywall_1.2.0_all.deb
 ## Use
 
 1. Open **ProxyWall** from the menu.
-2. Click the gear, choose the kind of server and **Save**:
+2. Press **Add** (or copy one or more share links and press **Paste links**), choose the kind of server and **Save**:
    - **SOCKS5 / HTTP:** address, port, and credentials if it needs them. You can also paste a whole URL such as `socks5://user:pass@192.168.1.5:1080` into the address box.
    - **SSH:** address, port, user name, and a password or a private key file.
    - **LINK:** paste the `vless://`, `vmess://`, `trojan://` or `ss://` link of your server.
-3. Press the big power button.
+3. Click the server you want in the list, and press the big power button.
+
+### Servers and tests
+
+The right half of the window is the list of saved servers. The one in use has a green dot; clicking another one switches to it, also while connected (connections running through the old server are cut, and nothing goes out directly in between).
+
+**Test all**, or the circular arrow on a row, measures a server without using it:
+
+| Shown | Meaning |
+| --- | --- |
+| `48 ms` | "ping": the time to open a connection to the server itself |
+| `Internet 182 ms` (green) | the round trip *through* the server to a small page (by default `https://www.google.com/generate_204`), timed on an already open connection so that it reflects the line, not the handshakes |
+| `No internet` (red) | the server answers, but nothing comes back through it: wrong password or id, or the server has no way out |
+| `No answer` (red) | the server itself cannot be reached |
+| flag | the country the server comes out in |
+
+Tests are made by the service with its own connections, so they also work while the firewall blocks everything else. If you block countries, a server that comes out in one of them is reported as such and the page is **not** fetched through it.
+
+While you are connected, the left side shows two latencies: *Server latency* (to the proxy) and *Internet* (through it to the test page, measured with a tiny request every 30 seconds, which costs your connection nothing noticeable).
 
 | The window says | Meaning |
 | --- | --- |
@@ -114,7 +131,7 @@ ProxyWall speaks SOCKS5 and HTTP itself. For the others it starts a helper next 
 
 The helper's own connection to your server is the only thing the firewall lets out, the same way as with a plain proxy. Its local port is closed to every other program.
 
-Supported in share links: TLS, REALITY and XTLS-Vision; raw TCP, WebSocket, gRPC, HTTPUpgrade and XHTTP transports; Shadowsocks AEAD and 2022 ciphers. Not supported: Hysteria, TUIC, WireGuard, NaiveProxy and Shadowsocks plugins (Xray does not speak them), and subscriptions.
+Supported in share links: TLS, REALITY and XTLS-Vision; raw TCP, WebSocket, gRPC, HTTPUpgrade and XHTTP transports; Shadowsocks AEAD and 2022 ciphers. Not supported: Hysteria, TUIC, WireGuard, NaiveProxy and Shadowsocks plugins (Xray does not speak them), and subscription URLs (paste the links themselves instead).
 
 The first time an SSH server is used, its host key is remembered in `/var/lib/proxywall/known_hosts`; if it later changes, ProxyWall refuses to connect and says so.
 
@@ -165,6 +182,9 @@ proxywall set-proxy 'vless://uuid@example.com:443?security=reality&pbk=...&type=
 proxywall set-proxy ssh://me@example.com --key ~/.ssh/id_ed25519
 proxywall exclude add '*.ir' 10.1.0.0/16
 proxywall block-country add IR
+proxywall server add 'trojan://secret@nl.example.net:443#Amsterdam' http://10.0.0.2:8080
+proxywall server test            # ping and internet check for every saved server
+proxywall server use Amsterdam
 proxywall kill-switch on
 proxywall connect
 proxywall status

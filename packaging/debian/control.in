@@ -15,8 +15,9 @@ Description: system-wide proxy client with a kill switch
  when the proxy cannot be reached, traffic is blocked instead of going out
  directly.
  .
- It comes with a small desktop interface that shows where your traffic
- comes out (country flag, map and coordinates), a command line tool, an exclusion
+ It comes with a desktop interface that keeps a list of servers, tests
+ them (ping and internet access), shows where your traffic comes out
+ (country flag, map and coordinates), a command line tool, an exclusion
  list for domains and addresses that should bypass the proxy (for example
  *.ir or 10.0.0.0/8), DNS leak protection and an always-on mode that also
  blocks traffic after a reboot until the proxy is connected. Chosen

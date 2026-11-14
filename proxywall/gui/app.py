@@ -19,7 +19,7 @@ gi.require_version("GdkPixbuf", "2.0")
 from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk, Pango  # noqa: E402
 
 from .. import APP_ID, APP_NAME, __version__, config, geo  # noqa: E402
-from ..geodata import LAND  # noqa: E402
+from ..geodata import COUNTRIES, LAND  # noqa: E402
 from ..cli import human_bytes  # noqa: E402
 from ..client import Client, DaemonUnavailable  # noqa: E402
 
@@ -43,6 +43,8 @@ STATES = {
     "connected": ("CONNECTED", "on", GREEN, "on", "All traffic goes through the proxy"),
     "connecting": ("CONNECTING", "wait", AMBER, "wait", "Reaching the proxy…"),
     "unreachable": ("NO PROXY", "bad", RED, "blocked", "Traffic is blocked until the proxy is back"),
+    "country_blocked": ("COUNTRY BLOCKED", "bad", RED, "blocked", "Nothing is sent while the proxy comes out there"),
+    "checking": ("CHECKING", "wait", AMBER, "wait", "Checking the exit country. Traffic waits."),
     "blocked": ("BLOCKED", "bad", RED, "blocked", "Firewall is on: connect to use the internet"),
     "disconnected": ("OFF", "off", GREY, "off", "Your traffic is not using the proxy"),
     "error": ("ERROR", "bad", RED, "blocked", "Something went wrong"),
@@ -102,23 +104,23 @@ def _paint_flag(cr, pixbuf, x, y, width, height, radius):
     cr.restore()
 
 
-def draw_tray_flag(pixbuf, size=48):
-    """The panel icon: a flag inside a green frame, on a transparent square."""
+def draw_tray_flag(pixbuf, size=48, colour=None):
+    """The panel icon: a flag inside a coloured frame (green unless told otherwise)."""
     import cairo
     unit = size / 48
     height = 38 * unit  # frame around a 4:3 flag
     border, top = 3.5 * unit, (size - height) / 2
     surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, size, size)
     cr = cairo.Context(surface)
-    cr.set_source_rgb(*GREEN)
+    cr.set_source_rgb(*(colour or GREEN))
     _rounded(cr, 0, top, size, height, 8 * unit)
     cr.fill()
     _paint_flag(cr, pixbuf, border, top + border, size - 2 * border, height - 2 * border, 4.5 * unit)
     return surface
 
 
-def tray_flag_icon(code):
-    """Path of a panel icon showing the flag inside a green frame, or None.
+def tray_flag_icon(code, blocked=False):
+    """Path of a panel icon showing the flag in a green (or, blocked, red) frame, or None.
 
     Panels take an icon file, so the picture is composed once per country and
     kept in the user's cache directory.
@@ -127,13 +129,14 @@ def tray_flag_icon(code):
     if pixbuf is None:
         return None
     directory = os.path.join(GLib.get_user_cache_dir(), "proxywall")
-    path = os.path.join(directory, f"proxywall-tray-flag-{code.lower()}-{TRAY_FLAG_STYLE}.png")
+    kind = "blocked" if blocked else "on"
+    path = os.path.join(directory, f"proxywall-tray-flag-{code.lower()}-{kind}-{TRAY_FLAG_STYLE}.png")
     if os.path.exists(path):
         return path
     try:
         os.makedirs(directory, exist_ok=True)
         temporary = f"{path}.{os.getpid()}.tmp"
-        draw_tray_flag(pixbuf).write_to_png(temporary)
+        draw_tray_flag(pixbuf, colour=RED if blocked else GREEN).write_to_png(temporary)
         os.replace(temporary, path)
     except Exception:  # an odd cache directory must never take the tray down
         return None
@@ -378,6 +381,9 @@ class Panel:
         self.on_state_change = on_state_change or (lambda *_: None)
         self.on_country_change = on_country_change or (lambda *_: None)
         self.country = None
+        self._blocked = set()          # country codes being edited in the settings
+        self._gate_supported = False   # does the running service know about blocked countries
+        self._countries_filled = False
         self.status = None
         self.state = None
         self._busy = False
@@ -392,7 +398,7 @@ class Panel:
         self.header.set_custom_title(self.title)
         self.back = Gtk.Button.new_from_icon_name("go-previous-symbolic", Gtk.IconSize.BUTTON)
         self.back.set_tooltip_text("Back")
-        self.back.connect("clicked", lambda *_: self.show_main())
+        self.back.connect("clicked", lambda *_: self.go_back())
         self.back.set_no_show_all(True)
         self.header.pack_start(self.back)
         self.gear = Gtk.Button.new_from_icon_name("emblem-system-symbolic", Gtk.IconSize.BUTTON)
@@ -407,6 +413,7 @@ class Panel:
         self.stack.set_transition_duration(180)
         self.stack.add_named(self._build_main(), "main")
         self.stack.add_named(self._build_settings(), "settings")
+        self.stack.add_named(self._build_countries(), "countries")
         self.render_stopped()
 
     # ------------------------------------------------------------ main page
@@ -534,6 +541,24 @@ class Panel:
         page.pack_start(_label("One per line. Example:  *.ir   example.com   10.1.0.0/16", "pw-key", wrap=True),
                         False, False, 0)
 
+        section("BLOCKED COUNTRIES")
+        self.countries_button = Gtk.Button()
+        self.countries_button.get_style_context().add_class("pw-rowbutton")
+        self.countries_button.get_accessible().set_name("Choose blocked countries")
+        row = Gtk.Box(spacing=8)
+        self.countries_flags = Gtk.Box(spacing=4)
+        self.countries_flags.set_valign(Gtk.Align.CENTER)
+        row.pack_start(self.countries_flags, False, False, 0)
+        self.countries_label = _label("None", "pw-value")
+        self.countries_label.set_ellipsize(Pango.EllipsizeMode.END)
+        row.pack_start(self.countries_label, True, True, 0)
+        row.pack_end(Gtk.Image.new_from_icon_name("go-next-symbolic", Gtk.IconSize.MENU), False, False, 0)
+        self.countries_button.add(row)
+        self.countries_button.connect("clicked", lambda *_: self.show_countries())
+        page.pack_start(self.countries_button, False, False, 0)
+        page.pack_start(_label("Nothing is sent while the proxy comes out in one of these countries.",
+                               "pw-key", wrap=True), False, False, 0)
+
         section("OPTIONS")
         options = _card()
 
@@ -575,6 +600,114 @@ class Panel:
         outer.pack_start(scroller, True, True, 0)
         outer.pack_start(bottom, False, False, 0)
         return outer
+
+    # ------------------------------------------------------------ countries page
+    def _build_countries(self):
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        page.set_border_width(20)
+        self.country_search = Gtk.SearchEntry(placeholder_text="Search countries")
+        self.country_search.connect("search-changed", lambda *_: self.country_list.invalidate_filter())
+        page.pack_start(self.country_search, False, False, 0)
+
+        frame = Gtk.Box()
+        frame.get_style_context().add_class("pw-textframe")
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        self.country_list = Gtk.ListBox()
+        self.country_list.get_style_context().add_class("pw-countries")
+        self.country_list.set_selection_mode(Gtk.SelectionMode.NONE)
+        self.country_list.set_activate_on_single_click(True)
+        self.country_list.set_filter_func(self._country_filter)
+        self.country_list.set_sort_func(self._country_sort)
+        self.country_list.connect("row-activated", self._on_country_row)
+        self.country_list.get_accessible().set_name("Countries to block")
+        scroller.add(self.country_list)
+        frame.pack_start(scroller, True, True, 0)
+        page.pack_start(frame, True, True, 0)
+
+        self.countries_done = Gtk.Button(label="Done")
+        self.countries_done.get_style_context().add_class("pw-primary")
+        self.countries_done.connect("clicked", lambda *_: self.go_back())
+        page.pack_start(self.countries_done, False, False, 0)
+        self._country_ticks = {}
+        self._country_top = frozenset()
+        return page
+
+    def _fill_countries(self):
+        """Built on first use: 250 rows are not worth paying for at start-up."""
+        self._countries_filled = True
+        for code, (name, _latitude, _longitude) in COUNTRIES.items():
+            row = Gtk.ListBoxRow()
+            row.set_name(code)
+            box = Gtk.Box(spacing=10)
+            flag = FlagView(26, 19)
+            flag.set_country(code)
+            box.pack_start(flag, False, False, 0)
+            box.pack_start(_label(name, "pw-country"), True, True, 0)
+            tick = Gtk.Image.new_from_icon_name("object-select-symbolic", Gtk.IconSize.MENU)
+            tick.get_style_context().add_class("pw-tick")
+            tick.set_no_show_all(True)
+            box.pack_end(tick, False, False, 0)
+            row.add(box)
+            row.show_all()
+            self._country_ticks[code] = tick
+            self.country_list.add(row)
+
+    def _country_filter(self, row):
+        text = self.country_search.get_text().strip().lower()
+        code = row.get_name()
+        return not text or text == code.lower() or text in COUNTRIES[code][0].lower()
+
+    def _country_sort(self, first, second):
+        def key(row):
+            code = row.get_name()
+            return (code not in self._country_top, COUNTRIES[code][0])
+        a, b = key(first), key(second)
+        return (a > b) - (a < b)
+
+    def _on_country_row(self, _list, row):
+        code = row.get_name()
+        self._blocked.symmetric_difference_update({code})
+        self._show_blocked()
+
+    def _show_blocked(self):
+        """Bring every view of the selection in line with `self._blocked`."""
+        chosen = sorted(self._blocked, key=lambda code: COUNTRIES[code][0])
+        for code, tick in self._country_ticks.items():
+            tick.set_visible(code in self._blocked)
+        self.countries_done.set_label(f"Done  ·  {len(chosen)} blocked" if chosen else "Done")
+        for child in self.countries_flags.get_children():
+            self.countries_flags.remove(child)
+        for code in chosen[:4]:
+            flag = FlagView(22, 16)
+            flag.set_country(code)
+            self.countries_flags.pack_start(flag, False, False, 0)
+        self.countries_flags.set_visible(bool(chosen))
+        names = ", ".join(COUNTRIES[code][0] for code in chosen)
+        self.countries_label.set_text(names or "None")
+        self.countries_label.set_tooltip_text(names or None)
+        context = self.countries_label.get_style_context()
+        (context.remove_class if chosen else context.add_class)("pw-dim")
+
+    def show_countries(self):
+        if not self._countries_filled:
+            self._fill_countries()
+        self._country_top = frozenset(self._blocked)  # chosen ones first, as they were on opening
+        self.country_search.set_text("")
+        self.country_list.invalidate_sort()
+        self.country_list.invalidate_filter()
+        self._show_blocked()
+        self.stack.set_visible_child_name("countries")
+        self.title.set_text("BLOCK COUNTRIES")
+        adjustment = self.country_list.get_parent().get_parent().get_vadjustment()
+        adjustment.set_value(adjustment.get_lower())
+
+    def go_back(self):
+        if self.stack.get_visible_child_name() == "countries":
+            self.stack.set_visible_child_name("settings")
+            self.title.set_text("SETTINGS")
+        else:
+            self.show_main()
 
     # ------------------------------------------------------------ navigation
     def show_main(self):
@@ -625,7 +758,7 @@ class Panel:
             explanation = "Add your proxy in settings to get started"
         elif state == "connecting":
             explanation = f"Reaching {status['proxy']}…"
-        detail = status.get("error") if state in ("unreachable", "error") else None
+        detail = status.get("error") if state in ("unreachable", "error", "country_blocked", "checking") else None
         self._apply_state(state, explanation, detail)
 
         self.values["proxy"].set_text(status["proxy"] or "Not set")
@@ -637,6 +770,11 @@ class Panel:
         self.values["latency"].set_text(f"{latency} ms" if latency is not None and state == "connected" else "—")
         self._render_location(status, state)
 
+        blocked = status.get("blocked_countries") or []
+        hint = "Never go online without the proxy"
+        if blocked:
+            hint = "Blocks exits in " + ", ".join(blocked[:5]) + (f" +{len(blocked) - 5}" if len(blocked) > 5 else "")
+        self.firewall_hint.set_text(hint)
         self.kill_switch.set_sensitive(True)
         if self.kill_switch.get_active() != status["kill_switch"]:
             self.kill_switch.handler_block(self._kill_handler)
@@ -657,13 +795,13 @@ class Panel:
         self._last_stats = (now, stats["up"], stats["down"])
 
     def _render_location(self, status, state):
-        connected = state == "connected"
+        connected = state in ("connected", "country_blocked")
         country = status.get("country") if connected else None
         latitude, longitude = (status.get("latitude"), status.get("longitude")) if connected else (None, None)
         place = geo.format_place(status) if connected else None
         self.flag.set_country(country)
         if latitude is not None and longitude is not None:
-            self.map.set_point(latitude, longitude)
+            self.map.set_point(latitude, longitude, RED if state == "country_blocked" else GREEN)
             text = geo.format_coordinates(latitude, longitude)
             self.coordinates.set_text(text if status.get("location_exact") else "≈ " + text)
             self.coordinates.set_tooltip_text(
@@ -676,7 +814,8 @@ class Panel:
         if connected:
             self.place.set_text(place or ("Finding the location…" if status.get("public_ip") else "Location unknown"))
         else:
-            self.place.set_text({"connecting": "Connecting…", "stopped": "—"}.get(state, "Not connected"))
+            self.place.set_text({"connecting": "Connecting…", "checking": "Checking the exit country…",
+                                 "stopped": "—"}.get(state, "Not connected"))
         self.place.set_tooltip_text(place)
         context = self.place.get_style_context()
         (context.remove_class if place else context.add_class)("pw-dim")
@@ -694,8 +833,8 @@ class Panel:
         self.sub_label.set_text(explanation or default_text)
         self.error_label.set_text(detail or "")
         self.error_label.set_visible(bool(detail))
-        self.power.set_visual(colour, lit=state in ("connected", "unreachable", "blocked", "error"),
-                              spinning=state == "connecting" or self._busy)
+        self.power.set_visual(colour, lit=state in ("connected", "unreachable", "blocked", "error", "country_blocked"),
+                              spinning=state in ("connecting", "checking") or self._busy)
         self.power.set_sensitive(state != "stopped")
         if state != self.state:
             previous, self.state = self.state, state
@@ -753,6 +892,10 @@ class Panel:
         buffer = self.exclude.get_buffer()
         buffer.set_text("\n".join(cfg["exclude"]))
         buffer.place_cursor(buffer.get_start_iter())
+        self._gate_supported = "blocked_countries" in cfg
+        self._blocked = {code for code in cfg.get("blocked_countries", []) if code in COUNTRIES}
+        self.countries_button.set_sensitive(self._gate_supported)
+        self._show_blocked()
         self.allow_lan.set_active(cfg["allow_lan"])
         self.autostart.set_active(os.path.exists(AUTOSTART_FILE))
         self._loading = False
@@ -814,6 +957,8 @@ class Panel:
             "exclude": [line.strip() for line in text.replace(",", "\n").splitlines() if line.strip()],
             "allow_lan": self.allow_lan.get_active(),
         }
+        if self._gate_supported:
+            patch["blocked_countries"] = sorted(self._blocked)
         autostart = self.autostart.get_active()
         self.save.set_sensitive(False)
         self._settings_message([])
@@ -902,17 +1047,17 @@ class Tray:
 
     def update(self, state, status):
         headline, _css, _colour, icon, text = STATES[state]
-        place = geo.format_place(status) if status and state == "connected" else None
+        place = geo.format_place(status) if status and state in ("connected", "country_blocked") else None
         if place:
-            text = f"{text}, out in {place}"
+            text = f"{text}, out in {place}" if state == "connected" else f"Blocked country: {place}"
         self.status_item.set_label(f"{APP_NAME}: {headline.capitalize()}" + (f" ({place})" if place else ""))
         self.toggle_item.set_label("Disconnect" if status and status["enabled"] else "Connect")
         self.toggle_item.set_sensitive(bool(status and status["proxy_configured"]))
         if self.icon is None:
             return
         path = None
-        if status and state == "connected":  # the flag of the country the traffic comes out in
-            path = tray_flag_icon(status.get("country"))
+        if status and state in ("connected", "country_blocked"):  # the flag of the exit country
+            path = tray_flag_icon(status.get("country"), blocked=state != "connected")
         path = path or icon_path(f"proxywall-tray-{icon}")
         if self.kind == "xapp":
             self.icon.set_icon_name(path or "proxywall")
@@ -999,8 +1144,8 @@ class Application(Gtk.Application):
         return False
 
     def _on_key(self, _window, event):
-        if event.keyval == Gdk.KEY_Escape and self.panel.stack.get_visible_child_name() == "settings":
-            self.panel.show_main()
+        if event.keyval == Gdk.KEY_Escape and self.panel.stack.get_visible_child_name() != "main":
+            self.panel.go_back()
             return True
         return False
 
@@ -1017,6 +1162,11 @@ class Application(Gtk.Application):
             ("unreachable", "connected"): ("Connected again", "Traffic is flowing through the proxy."),
             ("connecting", "unreachable"): ("Proxy unreachable", "Your traffic is blocked until the proxy answers."),
         }
+        if state == "country_blocked" and previous != "country_blocked":
+            place = geo.format_place(self.panel.status or {}) or "a blocked country"
+            messages[(previous, state)] = ("Blocked country", f"The proxy comes out in {place}. Nothing is sent.")
+        elif previous == "country_blocked" and state == "connected":
+            messages[(previous, state)] = ("Connected again", "The proxy no longer comes out in a blocked country.")
         if (previous, state) in messages:
             title, body = messages[(previous, state)]
             notification = Gio.Notification.new(title)

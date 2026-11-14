@@ -7,6 +7,7 @@ import os
 import re
 from urllib.parse import unquote, urlsplit
 
+from .geodata import COUNTRIES
 from .rules import normalize_list
 
 PROXY_TYPES = ("socks5", "http")
@@ -30,6 +31,12 @@ DEFAULTS = {
     # Asked through the proxy where that IP is (city and coordinates for the map).
     # Empty = never ask; the map then shows the capital of the country.
     "geo_url": "https://ipwho.is/",
+    # Country codes (ISO 3166, e.g. "IR"). While the proxy comes out in one of
+    # them, or the country cannot be established, nothing is sent through it.
+    "blocked_countries": [],
+    # How old the last country check may be when a new connection is let
+    # through, in seconds. 0 = check again before every single connection.
+    "country_check_seconds": 5,
     "tcp_port": 47201,
     "dns_port": 47253,
     "fwmark": 0x5057,
@@ -170,6 +177,21 @@ def validate(raw):
             errors.append(f"'{key}' must be an http(s) URL or empty")
         else:
             cfg[key] = url.strip()
+
+    countries = cfg["blocked_countries"]
+    if not isinstance(countries, list) or not all(isinstance(code, str) for code in countries):
+        errors.append("'blocked_countries' must be a list of country codes")
+    else:
+        codes = sorted({code.strip().upper() for code in countries})
+        unknown = [code for code in codes if code not in COUNTRIES]
+        if unknown:
+            errors.append("unknown country code: " + ", ".join(unknown))
+        elif codes and not cfg["ip_check_url"]:
+            errors.append("blocking countries needs 'ip_check_url': without it the country is never known")
+        cfg["blocked_countries"] = codes
+    age = cfg["country_check_seconds"]
+    if isinstance(age, bool) or not isinstance(age, int) or not 0 <= age <= 300:
+        errors.append("'country_check_seconds' must be a number between 0 and 300")
 
     for key in ("tcp_port", "dns_port"):
         value = cfg[key]

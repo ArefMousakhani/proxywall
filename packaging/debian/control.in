@@ -18,4 +18,6 @@ Description: system-wide SOCKS5/HTTP proxy client with a kill switch
  comes out (country flag, map and coordinates), a command line tool, an exclusion
  list for domains and addresses that should bypass the proxy (for example
  *.ir or 10.0.0.0/8), DNS leak protection and an always-on mode that also
- blocks traffic after a reboot until the proxy is connected.
+ blocks traffic after a reboot until the proxy is connected. Chosen
+ countries can be blocked as exits: while the proxy comes out in one of
+ them, nothing is sent through it.

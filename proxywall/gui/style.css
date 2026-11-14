@@ -98,6 +98,39 @@
     font-weight: 400;
 }
 
+button.pw-rowbutton {
+    background-color: rgba(255, 255, 255, 0.06);
+    background-image: none;
+    border: 1px solid rgba(255, 255, 255, 0.10);
+    border-radius: 10px;
+    box-shadow: none;
+    text-shadow: none;
+    color: #8f9bb3;
+    min-height: 40px;
+    padding: 0 12px;
+    -gtk-icon-shadow: none;
+}
+
+button.pw-rowbutton:hover { background-color: rgba(255, 255, 255, 0.10); }
+button.pw-rowbutton:disabled { opacity: 0.5; }
+
+.pw-countries,
+.pw-countries row {
+    background-color: transparent;
+    color: #e8edf7;
+}
+
+.pw-countries row {
+    padding: 7px 6px;
+    border-radius: 8px;
+}
+
+.pw-countries row:hover { background-color: rgba(255, 255, 255, 0.07); }
+
+.pw-country { font-size: 13.5px; }
+
+.pw-tick { color: #ff6b6b; }
+
 .pw-row-title {
     font-size: 14px;
     font-weight: 700;

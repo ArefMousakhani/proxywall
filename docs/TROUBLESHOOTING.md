@@ -54,6 +54,20 @@ curl -v --proxy http://192.168.1.5:8080 https://example.com        # HTTP
 
 (While ProxyWall is connected this test itself travels through the proxy when the proxy is not on your local network, so disconnect first.)
 
+## COUNTRY BLOCKED
+
+The proxy comes out in a country on your list (*Settings → Blocked countries*); the address and country are shown in the window and by `proxywall status`. Nothing is sent through the proxy until its exit moves. ProxyWall checks again every few seconds, so there is nothing to click once the proxy is fixed.
+
+If the country is wrong (geo-IP databases sometimes are), either remove the country (`proxywall block-country remove XX`) or stop asking the second service (`proxywall config geo_url=`).
+
+## CHECKING does not go away
+
+Countries are blocked, and ProxyWall cannot find out where the proxy comes out, so it sends nothing. The reason is printed under the status. Usually the IP service (`ip_check_url`) is unreachable through this proxy: try another one, for example `proxywall config ip_check_url=https://ipinfo.io/json`.
+
+## Everything became slower after blocking a country
+
+With `country_check_seconds=0` every new connection waits for a check. Set it back to `5`.
+
 ## Connected, but some sites do not load
 
 - **HTTP proxy:** many only permit `CONNECT` to port 443. Plain `http://` sites and other ports then fail. Use a SOCKS5 proxy or relax the proxy's rules.

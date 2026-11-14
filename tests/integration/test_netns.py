@@ -221,15 +221,18 @@ class NetnsTest(unittest.TestCase):
     def configure(self, **patch):
         self.client.set_config(patch)
 
-    def reset(self, **extra):
+    def reset(self, wait="connected", **extra):
         """Known starting point: SOCKS5 proxy, connected, *.ir excluded."""
+        if extra.get("blocked_countries"):
+            self.addCleanup(self.configure, blocked_countries=[])
         patch = {"proxy": {"type": "socks5", "host": "10.0.0.1", "port": 1080,
                            "username": "", "password": ""},
-                 "kill_switch": False, "allow_lan": True, "exclude": ["*.ir"], "ip_check_url": ""}
+                 "kill_switch": False, "allow_lan": True, "exclude": ["*.ir"], "ip_check_url": "",
+                 "geo_url": "", "blocked_countries": [], "country_check_seconds": 5}
         patch.update(extra)
         self.configure(**patch)
         self.client.connect()
-        self.wait_state("connected")
+        self.wait_state(wait)
 
     def assert_proxied(self, host, port=80):
         mark = self.mark()
@@ -581,6 +584,81 @@ class NetnsTest(unittest.TestCase):
             udp4.sendto(query, ("9.9.9.9", 53))
             self.assertTrue(fake(udp4.recv(4096)))
         self.assertFalse([l for l in self.since(mark) if l.startswith("dns")], "a DNS query left the machine")
+
+    # ------------------------------------------------------------ blocked countries
+    TRACE = "http://93.184.216.34/trace"
+
+    def set_exit_country(self, code):
+        with open(self.log + ".country", "w", encoding="utf-8") as handle:
+            handle.write(code)
+
+    def test_29_blocked_country_stops_the_very_next_connection(self):
+        self.set_exit_country("DE")
+        self.reset(ip_check_url=self.TRACE, blocked_countries=["IR"], country_check_seconds=0)
+        self.assert_proxied("www.example.com")
+        held = socket.create_connection(("www.example.com", 80), timeout=5)   # open before the exit moves
+        self.addCleanup(held.close)
+
+        self.set_exit_country("IR")
+        self.assert_blocked("www.example.com")          # no waiting: the next connection is already refused
+        self.assert_blocked("93.184.216.34")
+        status = self.client.status()
+        self.assertEqual((status["state"], status["country"]), ("country_blocked", "IR"))
+        self.assertIn("Iran", status["error"])
+        try:                                            # the connection from before was cut as well
+            held.sendall(b"GET / HTTP/1.1\r\nHost: www.example.com\r\nConnection: close\r\n\r\n")
+            self.assertEqual(held.recv(100), b"")
+        except OSError:
+            pass
+        self.assert_direct("site.ir")                   # what the user excluded never used the proxy anyway
+        self.assertEqual(http_get("10.0.0.1")["peer"], HOST_IP)
+        for _ in range(3):
+            self.assert_blocked("www.example.com")      # and it stays shut
+
+        self.set_exit_country("DE")
+        self.wait_state("connected", 25)
+        self.assert_proxied("www.example.com")
+
+    def test_30_blocked_country_with_a_check_interval(self):
+        self.set_exit_country("DE")
+        self.reset(ip_check_url=self.TRACE, blocked_countries=["IR", "RU"], country_check_seconds=1)
+        mark = self.mark()
+        for _ in range(5):
+            self.assert_proxied("www.example.com")
+        self.assertLessEqual(len([line for line in self.since(mark) if line.startswith("check ")]), 3,
+                             "a fresh answer should be reused for a moment")
+        self.set_exit_country("RU")
+        time.sleep(1.2)                                 # older than country_check_seconds
+        self.assert_blocked("www.example.com")
+        self.assertEqual(self.state(), "country_blocked")
+
+    def test_31_unverifiable_exit_is_blocked(self):
+        self.set_exit_country("DE")
+        self.configure(blocked_countries=[], ip_check_url="")
+        self.reset(wait="checking", ip_check_url="http://93.184.216.34:81/trace", blocked_countries=["IR"])
+        self.assert_blocked("www.example.com")
+        self.assertIn("could not be checked", self.client.status()["error"])
+        self.assert_direct("site.ir")
+
+    def test_32_second_opinion_and_restart(self):
+        """The city service may veto, and a restarted service starts closed."""
+        self.set_exit_country("IR")
+        self.configure(blocked_countries=[], ip_check_url="")
+        # A plain-text IP service knows no country, so the verdict rests on the second service.
+        self.reset(wait="country_blocked", ip_check_url="http://93.184.216.34/ip",
+                   geo_url="http://93.184.216.34/geo", blocked_countries=["IR"])
+        self.assert_blocked("www.example.com")
+        daemon = self.procs.pop("daemon")
+        daemon.terminate()
+        daemon.wait()
+        self.start_daemon()
+        self.assert_blocked("www.example.com")
+        self.wait_state("country_blocked")
+        # The way out of a wrong veto: stop asking that service.
+        self.set_exit_country("DE")
+        self.configure(ip_check_url=self.TRACE, geo_url="")
+        self.wait_state("connected")
+        self.assert_proxied("www.example.com")
 
     def test_99_final_disconnect_cleans_up(self):
         self.configure(kill_switch=False)

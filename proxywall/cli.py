@@ -15,6 +15,8 @@ STATE_TEXT = {
     "connected": "Connected",
     "connecting": "Connecting",
     "unreachable": "Proxy unreachable - traffic is blocked",
+    "country_blocked": "Blocked country - nothing is sent through the proxy",
+    "checking": "Checking the exit country - traffic waits",
     "blocked": "Disconnected - kill switch is blocking traffic",
     "disconnected": "Disconnected",
     "error": "Error",
@@ -45,7 +47,7 @@ def cmd_status(client, args):
         return 0
     print(f"Status       {STATE_TEXT.get(status['state'], status['state'])}")
     print(f"Proxy        {status['proxy'] or '(not set)'}")
-    if status["state"] == "connected":
+    if status["state"] in ("connected", "country_blocked"):
         ip = status.get("public_ip")
         if ip:
             print(f"Public IP    {ip}" + (f" ({status['country']})" if status.get("country") else ""))
@@ -57,6 +59,8 @@ def cmd_status(client, args):
             print(f"Location     {place}")
         if status.get("latency_ms") is not None:
             print(f"Latency      {status['latency_ms']} ms")
+    if status.get("blocked_countries"):
+        print(f"Blocked      {', '.join(status['blocked_countries'])}")
     print(f"Kill switch  {'on' if status['kill_switch'] else 'off'}")
     print(f"Allow LAN    {'on' if status['allow_lan'] else 'off'}")
     print(f"Exclusions   {status['excluded']}")
@@ -72,7 +76,7 @@ def cmd_connect(client, args):
     client.connect()
     deadline = time.monotonic() + args.wait
     status = client.status()
-    while status["state"] == "connecting" and time.monotonic() < deadline:
+    while status["state"] in ("connecting", "checking") and time.monotonic() < deadline:
         time.sleep(0.3)
         status = client.status()
     print(STATE_TEXT.get(status["state"], status["state"]))
@@ -123,6 +127,34 @@ def cmd_exclude(client, args):
         keys = {e.lstrip("*.") for e in drop}
         updated = [e for e in current if e.lstrip("*.") not in keys]
     print("\n".join(client.set_config({"exclude": updated})["exclude"]) or "(no exclusions)")
+    return 0
+
+
+def country_code(text):
+    """`ir`, `IR` or `Iran` -> `IR`. Raises ConfigError for anything unknown."""
+    wanted = text.strip()
+    if wanted.upper() in geo.COUNTRIES:
+        return wanted.upper()
+    for code, entry in geo.COUNTRIES.items():
+        if entry[0].lower() == wanted.lower():
+            return code
+    raise config.ConfigError(f"'{text}' is not a country code or name (see: proxywall block-country codes)")
+
+
+def cmd_block_country(client, args):
+    if args.action == "codes":
+        for code, entry in geo.COUNTRIES.items():
+            print(f"{code}  {entry[0]}")
+        return 0
+    current = client.get_config().get("blocked_countries", [])
+    if args.action != "list":
+        if not args.countries:
+            print("nothing to do: give at least one country code, e.g. IR", file=sys.stderr)
+            return 2
+        codes = {country_code(text) for text in args.countries}
+        updated = sorted(set(current) | codes) if args.action == "add" else [c for c in current if c not in codes]
+        current = client.set_config({"blocked_countries": updated})["blocked_countries"]
+    print("\n".join(f"{code}  {geo.country_name(code)}" for code in current) or "(no blocked countries)")
     return 0
 
 
@@ -213,6 +245,12 @@ def build_parser():
     p.add_argument("action", choices=("list", "add", "remove"))
     p.add_argument("entries", nargs="*", metavar="ENTRY", help="domain (*.ir), IP or network (10.0.0.0/8)")
     p.set_defaults(func=cmd_exclude)
+
+    p = sub.add_parser("block-country",
+                       help="never send traffic while the proxy comes out in these countries")
+    p.add_argument("action", choices=("list", "add", "remove", "codes"))
+    p.add_argument("countries", nargs="*", metavar="COUNTRY", help="code or name, e.g. IR")
+    p.set_defaults(func=cmd_block_country)
 
     p = sub.add_parser("config", help="show the configuration, or change it with key=value")
     p.add_argument("assignments", nargs="*", metavar="KEY=VALUE")

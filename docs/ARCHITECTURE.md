@@ -82,7 +82,7 @@ Desired state is two facts kept on disk: the configuration and `enabled` (does t
 | --- | --- | --- | --- |
 | no | off | removed | normal networking |
 | no | on | applied | everything blocked, exclusions direct |
-| yes | any | applied | everything through the proxy, exclusions direct |
+| yes | any | applied | everything through the proxy, exclusions direct; nothing through the proxy while its exit is in a blocked country |
 
 Ordering is chosen so that every transition passes through "closed", never "open": listeners start before the rules that feed them, and rules are removed before listeners stop.
 
@@ -97,6 +97,12 @@ Whenever the firewall is applied, the same rule set is written to `/var/lib/prox
 `monitor.py` probes the proxy (TCP connect; for SOCKS5 also the authentication handshake) every 10 s while it is reachable and every 3 s while it is not. It drives the status shown in the interface and nothing else. Routing never depends on it.
 
 The monitor also asks, through the proxy, for the public IP (`ip_check_url`, every 15 minutes) and, when that address changes, for its city and coordinates (`geo_url`). `geo.py` parses the replies and falls back to the capital of the country from `geodata.py`, a generated table that also holds the 75×28 land grid the interface draws its map from. The interface composes the flag tray icon itself and keeps it in `~/.cache/proxywall/`.
+
+### Country gate
+
+When `blocked_countries` is set, the monitor is also a gate. `tproxy.py` (and the DNS server, for lookups it forwards through the proxy) calls `Monitor.permit()` before every dial to the proxy. It answers yes only on the strength of a check that started no longer than `country_check_seconds` ago and found the exit outside every blocked country; otherwise the caller waits for a check that is new enough, and gets no if that check fails, times out, or finds no country at all. A positive answer is never carried over a change of proxy, a loss of the proxy or a change of the list: each of those cancels the running check and resets the verdict. Finding a blocked country cancels every relay task that is using the proxy.
+
+Like the rest of the design this can only close things: the firewall still forces all traffic into the relay, and the gate adds one more reason for the relay to refuse.
 
 ## Control protocol
 

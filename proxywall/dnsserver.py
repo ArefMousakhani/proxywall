@@ -208,7 +208,7 @@ class DnsServer:
 
     async def _forward_proxy(self, query, data):
         core = self.core
-        if not core.tunnel_open:
+        if not core.tunnel_open or not await core.monitor.permit():
             return dnsmsg.build_response(query, dnsmsg.SERVFAIL)
         sock = None
         try:

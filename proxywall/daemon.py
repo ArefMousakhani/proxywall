@@ -198,7 +198,10 @@ class Core:
             return "disconnected"
         if not self.enabled:
             return "blocked"
-        return self.monitor.state if self.monitor.state != "idle" else "connecting"
+        monitor = self.monitor
+        if monitor.state == "connected" and monitor.guarding and monitor.exit_verdict != "ok":
+            return "country_blocked" if monitor.exit_verdict == "blocked" else "checking"
+        return monitor.state if monitor.state != "idle" else "connecting"
 
     # ------------------------------------------------------------ commands
     async def cmd_status(self, _request):
@@ -216,7 +219,10 @@ class Core:
             "latency_ms": monitor.latency_ms,
             "public_ip": monitor.public_ip,
             **monitor.location(),
-            "error": self.error or self.config_error or (monitor.last_error if self.enabled else None),
+            "blocked_countries": list(self.cfg["blocked_countries"]),
+            "error": self.error or self.config_error or (
+                (monitor.last_error or (monitor.exit_error if monitor.guarding else None))
+                if self.enabled else None),
             "stats": dict(self.stats),
             "excluded": len(self.cfg["exclude"]),
         }
@@ -233,6 +239,8 @@ class Core:
             if self.enabled and not new["proxy"]["host"]:
                 raise config.ConfigError("disconnect before removing the proxy")
             proxy_changed = new["proxy"] != self.cfg["proxy"]
+            gate_changed = any(new[key] != self.cfg[key] for key in (
+                "blocked_countries", "country_check_seconds", "ip_check_url", "geo_url"))
             ports_changed = (new["tcp_port"], new["dns_port"], new["fwmark"]) != (
                 self.cfg["tcp_port"], self.cfg["dns_port"], self.cfg["fwmark"])
             config.save(paths.CONFIG_FILE, new)
@@ -244,6 +252,8 @@ class Core:
             await self.reconcile()
             if proxy_changed:
                 self.monitor.restart()
+            elif gate_changed:
+                self.monitor.policy_changed()
             log.info("configuration updated")
             return {"config": config.public_view(self.cfg)}
 

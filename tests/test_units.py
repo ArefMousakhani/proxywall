@@ -118,6 +118,18 @@ class ConfigTest(unittest.TestCase):
             self.assertEqual(config.load(os.path.join(tmp, "missing.json")), config.defaults())
 
 
+class CountryConfigTest(unittest.TestCase):
+    def test_blocked_countries(self):
+        cfg = config.validate({"blocked_countries": ["ir", " RU ", "IR"]})
+        self.assertEqual(cfg["blocked_countries"], ["IR", "RU"])
+        for bad in ({"blocked_countries": ["XX"]}, {"blocked_countries": "IR"}, {"blocked_countries": [1]},
+                    {"blocked_countries": ["IR"], "ip_check_url": ""},
+                    {"country_check_seconds": -1}, {"country_check_seconds": 301}, {"country_check_seconds": True}):
+            with self.assertRaises(config.ConfigError, msg=bad):
+                config.validate(bad)
+        self.assertEqual(config.validate({"country_check_seconds": 0})["country_check_seconds"], 0)
+
+
 class DnsMessageTest(unittest.TestCase):
     def test_roundtrip(self):
         query = dnsmsg.parse_query(dnsmsg.build_query("WWW.Example.com", dnsmsg.A, qid=0x1234))
@@ -298,7 +310,7 @@ class MonitorLocationTest(unittest.TestCase):
     """The lookup order: public IP first, then where it is, with a quiet fallback."""
 
     class Core:
-        cfg = {"ip_check_url": "http://ip.test/", "geo_url": "http://geo.test/"}
+        cfg = dict(config.defaults(), ip_check_url="http://ip.test/", geo_url="http://geo.test/")
 
     def lookup(self, replies, ip_reply="ip=203.0.113.9\nloc=AU\n", watcher=None):
         calls = []
@@ -315,7 +327,7 @@ class MonitorLocationTest(unittest.TestCase):
             watch.state = "connected"
             original, monitor.fetch = monitor.fetch, fake_fetch
             try:
-                await watch._lookup_ip("http://ip.test/")
+                await watch._start_check()[0]
             finally:
                 monitor.fetch = original
             return watch
@@ -343,7 +355,7 @@ class MonitorLocationTest(unittest.TestCase):
             self.assertEqual((place["latitude"], place["longitude"]), COUNTRIES["AU"][1:])
 
     def test_geo_lookup_can_be_turned_off(self):
-        core = type("Core", (), {"cfg": {"ip_check_url": "http://ip.test/", "geo_url": ""}})()
+        core = type("Core", (), {"cfg": dict(config.defaults(), ip_check_url="http://ip.test/", geo_url="")})()
         watch, calls = self.lookup([], watcher=monitor.Monitor(core))
         self.assertEqual(calls, ["http://ip.test/"])
         self.assertEqual(watch.location()["country"], "AU")
@@ -358,6 +370,165 @@ class MonitorLocationTest(unittest.TestCase):
         watch.public_ip = watch.country = None
         place = watch.location()
         self.assertEqual((place["country"], place["latitude"], place["city"]), (None, None, None))
+
+
+class CountryGateTest(unittest.TestCase):
+    """With blocked countries, a connection passes only after a fresh, successful check."""
+
+    def setUp(self):
+        self.replies = {"http://ip.test/": "ip=203.0.113.9\nloc=DE\n", "http://geo.test/": OSError("down")}
+        self.calls = []
+        self.cut = []
+        gate = self
+
+        class Relay:
+            def close_connections(self, proxied_only=False):
+                gate.cut.append(proxied_only)
+
+        class Core:
+            cfg = dict(config.defaults(), ip_check_url="http://ip.test/", geo_url="http://geo.test/",
+                       blocked_countries=["IR"], country_check_seconds=5)
+            tproxy = Relay()
+
+        self.core = Core()
+
+    def play(self, scenario):
+        async def fake_fetch(_core, url):
+            self.calls.append(url)
+            await asyncio.sleep(0)
+            reply = self.replies[url]
+            if isinstance(reply, Exception):
+                raise reply
+            return reply
+
+        async def wrapper():
+            watch = monitor.Monitor(self.core)
+            watch.state = "connected"
+            original, monitor.fetch = monitor.fetch, fake_fetch
+            try:
+                return await scenario(watch)
+            finally:
+                monitor.fetch = original
+
+        return run(wrapper())
+
+    def checks(self):
+        return self.calls.count("http://ip.test/")
+
+    def test_allowed_country_passes_and_is_remembered_briefly(self):
+        async def scenario(watch):
+            first = await watch.permit()
+            second = await watch.permit()
+            return first, second, watch.exit_verdict
+
+        self.assertEqual(self.play(scenario), (True, True, "ok"))
+        self.assertEqual(self.checks(), 1)
+        self.assertEqual(self.cut, [])
+
+    def test_blocked_country_never_passes(self):
+        self.replies["http://ip.test/"] = "ip=203.0.113.9\nloc=IR\n"
+
+        async def scenario(watch):
+            answers = [await watch.permit() for _ in range(5)]
+            return answers, watch.exit_verdict, watch.exit_error, watch.location()["country"]
+
+        answers, verdict, error, country = self.play(scenario)
+        self.assertEqual(answers, [False] * 5)
+        self.assertEqual((verdict, country), ("blocked", "IR"))
+        self.assertIn("Iran", error)
+        self.assertEqual(self.calls, ["http://ip.test/"])   # no second service, no repeated checks
+        self.assertEqual(self.cut, [True])                  # proxied connections were cut, once
+
+    def test_exit_moving_into_a_blocked_country_is_caught_by_the_next_check(self):
+        async def scenario(watch):
+            before = await watch.permit()
+            self.replies["http://ip.test/"] = "ip=198.51.100.7\nloc=IR\n"
+            watch._verified_at -= 6     # the last check is now older than country_check_seconds
+            after = await watch.permit()
+            return before, after, watch.exit_verdict
+
+        self.assertEqual(self.play(scenario), (True, False, "blocked"))
+        self.assertEqual(self.cut, [True])
+
+    def test_failed_or_useless_checks_hold_traffic(self):
+        for reply in (OSError("no route"), asyncio.TimeoutError(), "<html>", "203.0.113.9\n", ""):
+            self.replies["http://ip.test/"] = reply
+
+            async def scenario(watch):
+                return await watch.permit(), watch.exit_verdict, bool(watch.exit_error)
+
+            self.assertEqual(self.play(scenario), (False, "unknown", True), repr(reply))
+
+    def test_a_pass_expires(self):
+        async def scenario(watch):
+            await watch.permit()
+            self.replies["http://ip.test/"] = OSError("gone")
+            watch._verified_at -= 6
+            return await watch.permit(), watch.exit_verdict
+
+        self.assertEqual(self.play(scenario), (False, "unknown"))
+
+    def test_strict_mode_checks_before_every_connection(self):
+        self.core.cfg["country_check_seconds"] = 0
+
+        async def scenario(watch):
+            return [await watch.permit() for _ in range(4)]
+
+        self.assertEqual(self.play(scenario), [True] * 4)
+        self.assertEqual(self.checks(), 4)
+
+    def test_connections_arriving_together_share_one_check(self):
+        async def scenario(watch):
+            return await asyncio.gather(*(watch.permit() for _ in range(50)))
+
+        self.assertEqual(self.play(scenario), [True] * 50)
+        self.assertEqual(self.checks(), 1)
+
+    def test_second_service_can_veto(self):
+        self.replies["http://geo.test/"] = json.dumps({"ip": "203.0.113.9", "country_code": "IR",
+                                                       "latitude": 35.7, "longitude": 51.4})
+
+        async def scenario(watch):
+            return await watch.permit(), watch.exit_verdict, watch.country
+
+        self.assertEqual(self.play(scenario), (False, "blocked", "IR"))
+
+    def test_not_connected_means_no(self):
+        async def scenario(watch):
+            watch.state = "unreachable"
+            return await watch.permit()
+
+        self.assertFalse(self.play(scenario))
+        self.assertEqual(self.calls, [])
+
+    def test_blocking_the_current_country_takes_effect_at_once(self):
+        async def scenario(watch):
+            allowed = await watch.permit()
+            self.core.cfg["blocked_countries"] = ["DE", "IR"]
+            watch.policy_changed()
+            return allowed, watch.exit_verdict, await watch.permit()
+
+        self.assertEqual(self.play(scenario), (True, "blocked", False))
+        self.assertEqual(self.cut, [True])
+
+    def test_changed_settings_cancel_a_running_check(self):
+        async def scenario(watch):
+            task, _ = watch._start_check()
+            watch.restart()             # not running: nothing to restart, but
+            watch._forget()             # this is what restart and "unreachable" do
+            await asyncio.wait({task})
+            return task.cancelled(), watch.exit_verdict
+
+        self.assertEqual(self.play(scenario), (True, "unknown"))
+
+    def test_no_list_means_no_gate(self):
+        self.core.cfg["blocked_countries"] = []
+
+        async def scenario(watch):
+            return await watch.permit()
+
+        self.assertTrue(self.play(scenario))
+        self.assertEqual(self.calls, [])
 
 
 class FirewallRenderTest(unittest.TestCase):

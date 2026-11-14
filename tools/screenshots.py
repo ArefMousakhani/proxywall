@@ -28,11 +28,15 @@ SCENES = {
     "unreachable": dict(BASE, state="unreachable", public_ip=None, latency_ms=None,
                         error="cannot reach the proxy at 192.168.1.5:1080: Connection refused"),
     "blocked": dict(BASE, state="blocked", enabled=False, public_ip=None, latency_ms=None),
+    "country-blocked": dict(BASE, state="country_blocked", public_ip="198.51.100.24", country="IR",
+                            country_name="Iran", city="Tehran", latitude=35.6944, longitude=51.4215,
+                            blocked_countries=["IR"], latency_ms=None,
+                            error="The proxy comes out in Iran (198.51.100.24), a blocked country"),
     "off": dict(BASE, state="disconnected", enabled=False, kill_switch=False, firewall_active=False,
                 public_ip=None, latency_ms=None),
 }
 CONFIG = {"proxy": {"type": "socks5", "host": "192.168.1.5", "port": 1080, "username": "", "password_set": False},
-          "exclude": ["*.ir", "example.com", "10.1.0.0/16"], "allow_lan": True}
+          "exclude": ["*.ir", "example.com", "10.1.0.0/16"], "allow_lan": True, "blocked_countries": ["IR"]}
 
 
 class NoWorker:
@@ -40,7 +44,7 @@ class NoWorker:
         pass
 
 
-def shoot(name, out_dir, settings=False, status=None):
+def shoot(name, out_dir, settings=False, status=None, countries=False):
     panel = gui.Panel(NoWorker())
     window = Gtk.OffscreenWindow()
     window.get_style_context().add_class("pw-root")
@@ -54,12 +58,16 @@ def shoot(name, out_dir, settings=False, status=None):
     window.show_all()
     if status:
         panel.render(dict(status, stats=dict(STATS)))
-        panel.render(dict(status, stats=dict(STATS, up=180_000, down=2_400_000)))
+        moving = status["state"] == "connected"
+        panel.render(dict(status, stats=dict(STATS, up=180_000 if moving else 0, down=2_400_000 if moving else 0,
+                                             active=14 if moving else 0)))
         if status["state"] == "connecting":
             panel.power._angle = 4.0
     if settings:
         panel.show_settings()
         panel._fill_settings(CONFIG, None)
+    if countries:
+        panel.show_countries()
 
     def save():
         window.get_pixbuf().savev(os.path.join(out_dir, name + ".png"), "png", [], [])
@@ -107,6 +115,7 @@ def main():
     for name, status in SCENES.items():
         shoot(name, out_dir, status=status)
     shoot("settings", out_dir, settings=True, status=SCENES["connected"])
+    shoot("countries", out_dir, settings=True, countries=True, status=SCENES["connected"])
     shoot("stopped", out_dir)
     tray_strip(out_dir)
 

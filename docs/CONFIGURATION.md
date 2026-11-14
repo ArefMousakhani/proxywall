@@ -17,6 +17,8 @@ Settings are changed from the window, with the `proxywall` command, or both; the
 | `remote_dns` | `1.1.1.1` | resolver reached through the proxy for record types other than `A`/`AAAA` |
 | `ip_check_url` | Cloudflare trace URL | fetched through the proxy to show your public IP and its country; empty = never |
 | `geo_url` | `https://ipwho.is/` | asked through the proxy where that IP is (city and coordinates for the map); empty = never |
+| `blocked_countries` | `[]` | ISO country codes (`"IR"`); while the proxy comes out in one of them, or its country cannot be established, nothing is sent through it |
+| `country_check_seconds` | `5` | how old the last country check may be when a new connection is let through; `0` = check before every connection |
 | `tcp_port`, `dns_port` | `47201`, `47253` | local ports the firewall redirects to |
 | `fwmark` | `0x5057` (20567) | firewall mark of the service's own sockets; change it only if it collides with other software |
 | `log_level` | `info` | `debug`, `info`, `warning` or `error` |
@@ -31,6 +33,26 @@ The flag, the map and the coordinates describe the public IP address your traffi
 2. `geo_url` returns the city and coordinates. It is asked again only when the address changes. Any service that answers with JSON containing `latitude`/`longitude` (or `lat`/`lon`, or `loc`) works: `https://ipwho.is/`, `https://ipinfo.io/json`, `http://ip-api.com/json`.
 
 If `geo_url` is empty or does not answer, the map points at the capital of the country and the coordinates are prefixed with `≈`. That table is part of the package, so nothing is requested. With `ip_check_url` empty nothing is looked up at all and the location stays blank.
+
+### Blocked countries
+
+With a non-empty `blocked_countries`, every connection that would go through the proxy first has to pass a gate:
+
+1. The service fetches `ip_check_url` through the proxy and reads the exit address and its country. For an address it has not seen yet it also asks `geo_url`; if that service names a blocked country, that counts too.
+2. The connection is let through only if such a check, started at most `country_check_seconds` ago, found no blocked country. Otherwise it waits for a new check. Connections arriving together share one check; while traffic flows the check is renewed in the background, so nothing waits.
+3. Exit in a blocked country: state `country_blocked`, proxied connections are cut, new ones refused. Check failed or country unknown: state `checking`, new connections refused. In both states the service checks again every few seconds and recovers by itself.
+
+The same gate applies to DNS lookups that are sent through the proxy. Excluded destinations and the local network never use the proxy and are not affected.
+
+Limits, stated plainly: the check itself is a request that leaves through the exit; an exit that moves is noticed by the next check, so connections opened in between (at most `country_check_seconds`, plus the time one check takes) are not stopped; a proxy that rotates its exit per connection cannot be policed. `blocked_countries` needs `ip_check_url`.
+
+```sh
+proxywall block-country add IR RU        # codes or names
+proxywall block-country remove RU
+proxywall block-country list
+proxywall block-country codes            # every code ProxyWall knows
+proxywall config country_check_seconds=0 # strictest: one check per connection
+```
 
 ### Exclusion syntax
 
@@ -59,6 +81,7 @@ proxywall lan on|off                 Allow LAN
 proxywall exclude list
 proxywall exclude add ENTRY...
 proxywall exclude remove ENTRY...
+proxywall block-country list|add|remove|codes [COUNTRY...]
 proxywall config [KEY=VALUE...]      show the configuration, or change any setting
 proxywall logs [-n COUNT]            recent service messages
 sudo proxywall reset-firewall        emergency: remove the firewall and stop the service
@@ -75,7 +98,7 @@ proxywall config 'direct_dns=["192.168.1.1"]'
 proxywall status --json | jq .state
 ```
 
-Exit codes: `0` success, `1` the service rejected the request, `2` bad arguments, `3` not connected, `4` the service is not running.
+Exit codes: `0` success, `1` the service rejected the request, `2` bad arguments, `3` not connected (this includes a blocked country), `4` the service is not running.
 
 ## Who may control ProxyWall
 

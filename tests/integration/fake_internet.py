@@ -71,6 +71,25 @@ async def http_client(reader, writer):
         peer = writer.get_extra_info("peername")[0]
         local = writer.get_extra_info("sockname")[0]
         tls = writer.get_extra_info("ssl_object") is not None
+        if path in ("/trace", "/geo", "/ip"):
+            # "What is my IP" services. The country they report is whatever the
+            # test wrote into <log>.country, so a test can move the exit around.
+            try:
+                with open(LOG + ".country", encoding="utf-8") as handle:
+                    country = handle.read().strip()
+            except OSError:
+                country = "DE"
+            record("check", path, peer, country)
+            if path == "/trace":
+                body = f"ip={peer}\nloc={country}\n".encode()
+            elif path == "/ip":
+                body = peer.encode()  # an address and nothing else
+            else:
+                body = json.dumps({"ip": peer, "country_code": country, "latitude": 1.5, "longitude": 2.5}).encode()
+            writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: " + str(len(body)).encode()
+                         + b"\r\nConnection: close\r\n\r\n" + body)
+            await writer.drain()
+            return
         record("https" if tls else "http", peer, host, local)
         if path.startswith("/blob/"):
             size = int(path.rsplit("/", 1)[1])

@@ -15,6 +15,10 @@ ProxyWall turns a plain proxy (`192.168.1.5:1080`, a proxy shared from your phon
   <img src="docs/images/unreachable.png" width="240" alt="ProxyWall kill switch: proxy unreachable, traffic is blocked">
   <img src="docs/images/settings.png" width="240" alt="ProxyWall settings: proxy address and bypass list">
 </p>
+<p align="center">
+  <img src="docs/images/country-blocked.png" width="240" alt="ProxyWall blocking all traffic because the proxy comes out in a blocked country">
+  <img src="docs/images/countries.png" width="240" alt="ProxyWall country list with flags: choose the countries to block">
+</p>
 
 <p align="center">
   <img src="docs/images/tray.png" width="190" alt="ProxyWall tray icon: the flag of the country your traffic comes out in, with a green frame">
@@ -50,6 +54,7 @@ ProxyWall fixes all five with one switch.
 - **Exclusion list (split tunnelling).** Domains (`*.ir`, `example.com`), single addresses and networks (`10.1.0.0/16`) that should bypass the proxy.
 - **SOCKS5 and HTTP CONNECT** proxies, with optional username and password.
 - **Small and auditable.** Pure Python standard library plus `nftables`; no bundled binaries. The privileged service runs with a single capability inside a systemd sandbox.
+- **Block exit countries.** Pick the countries your traffic must never come out in. Nothing is sent until the exit has been checked, and if the proxy starts coming out in one of them (or its country cannot be checked), everything is blocked at once.
 - **See where you come out.** The window shows the country flag, city, a small world map and the coordinates of your public IP; the tray icon turns into that country's flag while you are connected.
 - **Desktop app, tray icon and CLI.**
 
@@ -85,6 +90,8 @@ sudo apt install ./dist/proxywall_1.1.0_all.deb
 | **CONNECTED** (green) | Everything goes through the proxy. The map and the flag show where it comes out. |
 | **CONNECTING** (amber) | Waiting for the proxy to answer. Traffic is already blocked from going out directly. |
 | **NO PROXY** (red) | The proxy cannot be reached. Traffic is blocked until it is back; ProxyWall keeps retrying every few seconds. |
+| **COUNTRY BLOCKED** (red) | The proxy comes out in a country you blocked. Nothing is sent through it. |
+| **CHECKING** (amber) | Countries are blocked and the exit country is not established yet (or the check fails). Traffic waits. |
 | **BLOCKED** (red) | You are disconnected and the *Firewall* switch is on: nothing leaves the machine. |
 | **OFF** (grey) | Disconnected, firewall off: normal direct networking. |
 
@@ -112,11 +119,29 @@ In *Settings → Bypass the proxy*, one entry per line:
 
 Excluded destinations always go out directly, also while the firewall is blocking everything else. *Allow local network* does the same for private address ranges (your router, printer, NAS, and usually the proxy itself).
 
+### Blocked countries
+
+In *Settings → Blocked countries*, tick the countries your traffic must never come out in (for example the country you are in, when the point of the proxy is to appear somewhere else). From then on:
+
+- After connecting, **nothing is handed to the proxy until a check has shown where it comes out**.
+- Every new connection needs a check that is at most 5 seconds old. A connection that arrives later waits for a new one.
+- When the exit is in a blocked country, the window turns red (**COUNTRY BLOCKED**), open connections through the proxy are cut and new ones are refused. ProxyWall keeps checking and opens again by itself when the exit has moved out.
+- When the country **cannot be established** (the check fails, or nobody knows the address), traffic is blocked as well.
+
+What you should know:
+
+- The check is one small request through the proxy to the IP service (Cloudflare by default). It is the only way to learn where the exit is, so that one request does leave through a blocked exit. Nothing from your programs goes with it.
+- If the exit moves while you are connected, connections opened before the next check, at most 5 seconds, can still leave through the new exit. `proxywall config country_check_seconds=0` checks before **every** connection instead; each new connection then waits for one check (about a second through a typical proxy).
+- A proxy that sends every connection out through a different address cannot be policed this way.
+- Countries come from geo-IP databases, which are occasionally wrong. When the two services disagree, the stricter answer wins.
+- Your bypass list and the local network do not use the proxy and stay reachable.
+
 ### Command line
 
 ```sh
 proxywall set-proxy socks5://user:pass@192.168.1.5:1080
 proxywall exclude add '*.ir' 10.1.0.0/16
+proxywall block-country add IR
 proxywall kill-switch on
 proxywall connect
 proxywall status
@@ -171,6 +196,9 @@ No. It does not encrypt anything by itself and it carries TCP and DNS, not all I
 **What happens when the proxy goes down?**
 Connections fail immediately and stay blocked until the proxy answers again. Traffic is never sent directly.
 
+**Can I make sure I never appear with an IP address from a certain country?**
+Yes: add it under *Blocked countries*. Traffic is held until the exit country is known and blocked while it is on your list. Read [Blocked countries](#blocked-countries) for the exact guarantee.
+
 **Can some sites skip the proxy?**
 Yes: add domains (`*.ir`), addresses or networks to the bypass list.
 
@@ -192,6 +220,7 @@ The service and the command line work everywhere. The window is GTK 3 and runs o
 | **NO PROXY** | Check address, port and type; the reason is printed under the status and in `proxywall logs` |
 | I am locked out and need the internet now | `sudo proxywall reset-firewall` |
 | One site must not use the proxy | add it to the bypass list |
+| **COUNTRY BLOCKED** | the proxy comes out in a country on your list: fix the proxy, or change the list in *Settings → Blocked countries* |
 
 More in [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
 

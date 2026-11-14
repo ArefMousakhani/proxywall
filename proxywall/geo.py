@@ -8,6 +8,8 @@ import re
 from .geodata import COUNTRIES, LAND, MAP_CELL, MAP_LAT_TOP, MAP_LON_LEFT
 
 MAP_COLS, MAP_ROWS = len(LAND[0]), len(LAND)
+__all__ = ["COUNTRIES", "MAP_COLS", "MAP_ROWS", "country_name", "describe", "format_coordinates",
+           "format_place", "map_cell", "parse_reply"]
 
 
 def _country_code(value):

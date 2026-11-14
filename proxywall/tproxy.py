@@ -132,6 +132,7 @@ class TransparentProxy:
         self._original_dst = original_dst
         self._servers = []
         self._tasks = set()
+        self._proxied = set()  # the subset of _tasks that goes (or is about to go) through the proxy
         self.port = None
 
     @property
@@ -176,8 +177,8 @@ class TransparentProxy:
                 pass
         self.port = None
 
-    def close_connections(self):
-        for task in list(self._tasks):
+    def close_connections(self, proxied_only=False):
+        for task in list(self._proxied if proxied_only else self._tasks):
             task.cancel()
 
     async def _accept(self, reader, writer):
@@ -196,6 +197,7 @@ class TransparentProxy:
         finally:
             stats["active"] -= 1
             self._tasks.discard(task)
+            self._proxied.discard(task)
 
     async def _handle(self, reader, writer):
         core = self.core
@@ -240,6 +242,14 @@ class TransparentProxy:
                 _abort(writer)
                 return
             else:
+                # From here on the connection counts as proxied, so that a
+                # country block arriving during the dial still cuts it.
+                self._proxied.add(asyncio.current_task())
+                if not await core.monitor.permit():
+                    core.stats["blocked"] += 1
+                    log.debug("blocked %s:%d (exit country)", target, port)
+                    _abort(writer)
+                    return
                 up_sock, leftover = await core.dial_proxy(target, port)
         except (upstream.ProxyError, ResolveError, OSError, asyncio.TimeoutError) as exc:
             core.stats["failed"] += 1

@@ -27,6 +27,9 @@ DEFAULTS = {
     "remote_dns": "1.1.1.1",
     # Fetched through the proxy to show the public IP. Empty = never fetch.
     "ip_check_url": "https://www.cloudflare.com/cdn-cgi/trace",
+    # Asked through the proxy where that IP is (city and coordinates for the map).
+    # Empty = never ask; the map then shows the capital of the country.
+    "geo_url": "https://ipwho.is/",
     "tcp_port": 47201,
     "dns_port": 47253,
     "fwmark": 0x5057,
@@ -161,11 +164,12 @@ def validate(raw):
     else:
         cfg["remote_dns"] = cfg["remote_dns"].strip()
 
-    url = cfg["ip_check_url"]
-    if not isinstance(url, str) or (url and not re.match(r"^https?://[^/\s]+", url.strip())):
-        errors.append("'ip_check_url' must be an http(s) URL or empty")
-    else:
-        cfg["ip_check_url"] = url.strip()
+    for key in ("ip_check_url", "geo_url"):
+        url = cfg[key]
+        if not isinstance(url, str) or (url and not re.match(r"^https?://[^/\s]+", url.strip())):
+            errors.append(f"'{key}' must be an http(s) URL or empty")
+        else:
+            cfg[key] = url.strip()
 
     for key in ("tcp_port", "dns_port"):
         value = cfg[key]

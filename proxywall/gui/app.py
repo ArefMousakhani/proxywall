@@ -7,6 +7,7 @@ handling live in the system service, so closing the window changes nothing.
 import math
 import os
 import queue
+import re
 import sys
 import threading
 
@@ -14,14 +15,17 @@ import gi
 
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
-from gi.repository import Gdk, Gio, GLib, Gtk, Pango  # noqa: E402
+gi.require_version("GdkPixbuf", "2.0")
+from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk, Pango  # noqa: E402
 
-from .. import APP_ID, APP_NAME, __version__, config  # noqa: E402
+from .. import APP_ID, APP_NAME, __version__, config, geo  # noqa: E402
+from ..geodata import LAND  # noqa: E402
 from ..cli import human_bytes  # noqa: E402
 from ..client import Client, DaemonUnavailable  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ICON_DIRS = (os.path.join(HERE, "..", "..", "data", "icons"), "/usr/share/proxywall/icons")
+FLAG_DIRS = (os.path.join(HERE, "..", "..", "data", "flags"), "/usr/share/proxywall/flags")
 AUTOSTART_FILE = os.path.join(GLib.get_user_config_dir(), "autostart", "proxywall.desktop")
 AUTOSTART_ENTRY = """[Desktop Entry]
 Type=Application
@@ -46,12 +50,182 @@ STATES = {
 }
 
 
+TRAY_FLAG_STYLE = "v1"  # part of the cached file name: change it when the drawing changes
+
+
 def icon_path(name):
     for directory in ICON_DIRS:
         path = os.path.abspath(os.path.join(directory, name + ".svg"))
         if os.path.exists(path):
             return path
     return None
+
+
+_flags = {}
+
+
+def flag_pixbuf(code):
+    """The flag of an ISO country code as a pixbuf, or None."""
+    if not isinstance(code, str) or not re.fullmatch(r"[A-Za-z]{2}", code):
+        return None
+    code = code.lower()
+    if code not in _flags:
+        _flags[code] = None
+        for directory in FLAG_DIRS:
+            path = os.path.join(directory, code + ".png")
+            if os.path.exists(path):
+                try:
+                    _flags[code] = GdkPixbuf.Pixbuf.new_from_file(path)
+                except GLib.Error:
+                    pass
+                break
+    return _flags[code]
+
+
+def _rounded(cr, x, y, width, height, radius):
+    cr.new_sub_path()
+    cr.arc(x + width - radius, y + radius, radius, -math.pi / 2, 0)
+    cr.arc(x + width - radius, y + height - radius, radius, 0, math.pi / 2)
+    cr.arc(x + radius, y + height - radius, radius, math.pi / 2, math.pi)
+    cr.arc(x + radius, y + radius, radius, math.pi, 1.5 * math.pi)
+    cr.close_path()
+
+
+def _paint_flag(cr, pixbuf, x, y, width, height, radius):
+    cr.save()
+    _rounded(cr, x, y, width, height, radius)
+    cr.clip()
+    cr.translate(x, y)
+    cr.scale(width / pixbuf.get_width(), height / pixbuf.get_height())
+    Gdk.cairo_set_source_pixbuf(cr, pixbuf, 0, 0)
+    cr.paint()
+    cr.restore()
+
+
+def draw_tray_flag(pixbuf, size=48):
+    """The panel icon: a flag inside a green frame, on a transparent square."""
+    import cairo
+    unit = size / 48
+    height = 38 * unit  # frame around a 4:3 flag
+    border, top = 3.5 * unit, (size - height) / 2
+    surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, size, size)
+    cr = cairo.Context(surface)
+    cr.set_source_rgb(*GREEN)
+    _rounded(cr, 0, top, size, height, 8 * unit)
+    cr.fill()
+    _paint_flag(cr, pixbuf, border, top + border, size - 2 * border, height - 2 * border, 4.5 * unit)
+    return surface
+
+
+def tray_flag_icon(code):
+    """Path of a panel icon showing the flag inside a green frame, or None.
+
+    Panels take an icon file, so the picture is composed once per country and
+    kept in the user's cache directory.
+    """
+    pixbuf = flag_pixbuf(code)
+    if pixbuf is None:
+        return None
+    directory = os.path.join(GLib.get_user_cache_dir(), "proxywall")
+    path = os.path.join(directory, f"proxywall-tray-flag-{code.lower()}-{TRAY_FLAG_STYLE}.png")
+    if os.path.exists(path):
+        return path
+    try:
+        os.makedirs(directory, exist_ok=True)
+        temporary = f"{path}.{os.getpid()}.tmp"
+        draw_tray_flag(pixbuf).write_to_png(temporary)
+        os.replace(temporary, path)
+    except Exception:  # an odd cache directory must never take the tray down
+        return None
+    return path
+
+
+class WorldMap(Gtk.DrawingArea):
+    """A small dotted world map with one glowing point: where the traffic comes out."""
+
+    WIDTH = 296
+
+    def __init__(self):
+        super().__init__()
+        self._point = None
+        self._colour = GREEN
+        self.set_size_request(self.WIDTH, math.ceil(self.WIDTH * geo.MAP_ROWS / geo.MAP_COLS))
+        self.connect("draw", self._draw)
+
+    def set_point(self, latitude=None, longitude=None, colour=GREEN):
+        point = None if latitude is None or longitude is None else (latitude, longitude)
+        if (point, colour) != (self._point, self._colour):
+            self._point, self._colour = point, colour
+            self.queue_draw()
+
+    def _draw(self, area, cr):
+        import cairo
+        width, height = area.get_allocated_width(), area.get_allocated_height()
+        pitch = min(width / geo.MAP_COLS, height / geo.MAP_ROWS)
+        left = (width - geo.MAP_COLS * pitch) / 2
+        top = (height - geo.MAP_ROWS * pitch) / 2
+        radius = pitch * 0.30
+        for row, line in enumerate(LAND):
+            cy = top + (row + 0.5) * pitch
+            for column, cell in enumerate(line):
+                if cell == "#":
+                    cx = left + (column + 0.5) * pitch
+                    cr.new_sub_path()
+                    cr.arc(cx, cy, radius, 0, 2 * math.pi)
+        cr.set_source_rgba(1, 1, 1, 0.20 if self._point else 0.13)
+        cr.fill()
+        if self._point is None:
+            return False
+        column, row = geo.map_cell(*self._point)
+        cx = min(max(left + column * pitch, 6), width - 6)
+        cy = min(max(top + row * pitch, 6), height - 6)
+        r, g, b = self._colour
+        halo = cairo.RadialGradient(cx, cy, 2, cx, cy, 17)
+        halo.add_color_stop_rgba(0, r, g, b, 0.45)
+        halo.add_color_stop_rgba(1, r, g, b, 0.0)
+        cr.set_source(halo)
+        cr.arc(cx, cy, 17, 0, 2 * math.pi)
+        cr.fill()
+        cr.set_source_rgba(r, g, b, 0.55)
+        cr.set_line_width(1.2)
+        cr.arc(cx, cy, 7.5, 0, 2 * math.pi)
+        cr.stroke()
+        cr.set_source_rgb(0.055, 0.082, 0.149)
+        cr.arc(cx, cy, 4.6, 0, 2 * math.pi)
+        cr.fill()
+        cr.set_source_rgb(r, g, b)
+        cr.arc(cx, cy, 3.3, 0, 2 * math.pi)
+        cr.fill()
+        return False
+
+
+class FlagView(Gtk.DrawingArea):
+    """A small flag with rounded corners."""
+
+    def __init__(self, width=24, height=18):
+        super().__init__()
+        self._pixbuf = None
+        self.set_size_request(width, height)
+        self.set_valign(Gtk.Align.CENTER)
+        self.set_no_show_all(True)
+        self.connect("draw", self._draw)
+
+    def set_country(self, code):
+        pixbuf = flag_pixbuf(code)
+        if pixbuf is not self._pixbuf:
+            self._pixbuf = pixbuf
+            self.queue_draw()
+        self.set_visible(pixbuf is not None)
+
+    def _draw(self, area, cr):
+        if self._pixbuf is not None:
+            width, height = area.get_allocated_width(), area.get_allocated_height()
+            _paint_flag(cr, self._pixbuf, 0, 0, width, height, 3.5)
+            cr.set_source_rgba(1, 1, 1, 0.18)
+            cr.set_line_width(1)
+            _rounded(cr, 0.5, 0.5, width - 1, height - 1, 3.5)
+            cr.stroke()
+        return False
 
 
 class Worker:
@@ -79,7 +253,7 @@ class Worker:
 class PowerButton(Gtk.Button):
     """The one big control. Drawn by hand so it can glow and animate."""
 
-    SIZE = 176
+    SIZE = 150
 
     def __init__(self):
         super().__init__()
@@ -199,9 +373,11 @@ def _card():
 class Panel:
     """All widgets and behaviour, independent of the window that hosts them."""
 
-    def __init__(self, worker, on_state_change=None):
+    def __init__(self, worker, on_state_change=None, on_country_change=None):
         self.worker = worker
         self.on_state_change = on_state_change or (lambda *_: None)
+        self.on_country_change = on_country_change or (lambda *_: None)
+        self.country = None
         self.status = None
         self.state = None
         self._busy = False
@@ -253,8 +429,23 @@ class Panel:
         self.error_label.set_no_show_all(True)
         page.pack_start(self.error_label, False, False, 0)
 
+        location = _card()
+        location.set_margin_top(18)
+        self.map = WorldMap()
+        location.pack_start(self.map, False, False, 0)
+        row = Gtk.Box(spacing=8)
+        self.flag = FlagView()
+        row.pack_start(self.flag, False, False, 0)
+        self.place = _label("", "pw-value")
+        self.place.set_ellipsize(Pango.EllipsizeMode.END)
+        row.pack_start(self.place, True, True, 0)
+        self.coordinates = _label("", "pw-key", 1.0, selectable=True)
+        row.pack_end(self.coordinates, False, False, 0)
+        location.pack_start(row, False, False, 0)
+        page.pack_start(location, False, False, 0)
+
         info = _card()
-        info.set_margin_top(20)
+        info.set_margin_top(12)
         self.values = {}
         for key, title in (("proxy", "Proxy"), ("ip", "IP address"), ("latency", "Latency")):
             row = Gtk.Box(spacing=12)
@@ -422,6 +613,7 @@ class Panel:
         self._apply_state("stopped", detail=detail)
         for value in self.values.values():
             value.set_text("—")
+        self._render_location({}, "stopped")
         self.kill_switch.set_sensitive(False)
         self.footer.set_text("")
 
@@ -443,6 +635,7 @@ class Panel:
         self.values["ip"].set_text(ip or "—")
         latency = status.get("latency_ms")
         self.values["latency"].set_text(f"{latency} ms" if latency is not None and state == "connected" else "—")
+        self._render_location(status, state)
 
         self.kill_switch.set_sensitive(True)
         if self.kill_switch.get_active() != status["kill_switch"]:
@@ -462,6 +655,34 @@ class Panel:
         else:
             self.footer.set_text("")
         self._last_stats = (now, stats["up"], stats["down"])
+
+    def _render_location(self, status, state):
+        connected = state == "connected"
+        country = status.get("country") if connected else None
+        latitude, longitude = (status.get("latitude"), status.get("longitude")) if connected else (None, None)
+        place = geo.format_place(status) if connected else None
+        self.flag.set_country(country)
+        if latitude is not None and longitude is not None:
+            self.map.set_point(latitude, longitude)
+            text = geo.format_coordinates(latitude, longitude)
+            self.coordinates.set_text(text if status.get("location_exact") else "≈ " + text)
+            self.coordinates.set_tooltip_text(
+                "Where your traffic comes out" if status.get("location_exact")
+                else "Only the country is known: this is its capital")
+        else:
+            self.map.set_point()
+            self.coordinates.set_text("")
+            self.coordinates.set_tooltip_text(None)
+        if connected:
+            self.place.set_text(place or ("Finding the location…" if status.get("public_ip") else "Location unknown"))
+        else:
+            self.place.set_text({"connecting": "Connecting…", "stopped": "—"}.get(state, "Not connected"))
+        self.place.set_tooltip_text(place)
+        context = self.place.get_style_context()
+        (context.remove_class if place else context.add_class)("pw-dim")
+        if country != self.country:
+            self.country = country
+            self.on_country_change()
 
     def _apply_state(self, state, explanation=None, detail=None):
         headline, css, colour, _icon, default_text = STATES[state]
@@ -681,12 +902,18 @@ class Tray:
 
     def update(self, state, status):
         headline, _css, _colour, icon, text = STATES[state]
-        self.status_item.set_label(f"{APP_NAME}: {headline.capitalize()}")
+        place = geo.format_place(status) if status and state == "connected" else None
+        if place:
+            text = f"{text}, out in {place}"
+        self.status_item.set_label(f"{APP_NAME}: {headline.capitalize()}" + (f" ({place})" if place else ""))
         self.toggle_item.set_label("Disconnect" if status and status["enabled"] else "Connect")
         self.toggle_item.set_sensitive(bool(status and status["proxy_configured"]))
         if self.icon is None:
             return
-        path = icon_path(f"proxywall-tray-{icon}")
+        path = None
+        if status and state == "connected":  # the flag of the country the traffic comes out in
+            path = tray_flag_icon(status.get("country"))
+        path = path or icon_path(f"proxywall-tray-{icon}")
         if self.kind == "xapp":
             self.icon.set_icon_name(path or "proxywall")
             self.icon.set_tooltip_text(f"{APP_NAME}: {text}")
@@ -727,12 +954,12 @@ class Application(Gtk.Application):
         else:
             Gtk.Window.set_default_icon_name("proxywall")
 
-        self.panel = Panel(Worker(), self._on_state_change)
+        self.panel = Panel(Worker(), self._on_state_change, self._on_country_change)
         self.window = Gtk.ApplicationWindow(application=self, title=APP_NAME)
         self.window.get_style_context().add_class("pw-root")
         self.window.set_titlebar(self.panel.header)
         self.window.add(self.panel.stack)
-        self.window.set_default_size(372, 660)
+        self.window.set_default_size(372, 716)
         self.window.set_resizable(False)
         self.window.set_position(Gtk.WindowPosition.CENTER)
         self.window.connect("delete-event", self._on_close)
@@ -776,6 +1003,10 @@ class Application(Gtk.Application):
             self.panel.show_main()
             return True
         return False
+
+    def _on_country_change(self):
+        if self.tray is not None and self.panel is not None and self.panel.state is not None:
+            self.tray.update(self.panel.state, self.panel.status)
 
     def _on_state_change(self, previous, state):
         if self.tray is None or self.panel is None:

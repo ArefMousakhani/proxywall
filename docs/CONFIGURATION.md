@@ -15,12 +15,22 @@ Settings are changed from the window, with the `proxywall` command, or both; the
 | `exclude` | `[]` | domains, addresses and networks that bypass the proxy |
 | `direct_dns` | `[]` | DNS servers for excluded and local names; empty = the system's |
 | `remote_dns` | `1.1.1.1` | resolver reached through the proxy for record types other than `A`/`AAAA` |
-| `ip_check_url` | Cloudflare trace URL | fetched through the proxy to show your public IP; empty = never |
+| `ip_check_url` | Cloudflare trace URL | fetched through the proxy to show your public IP and its country; empty = never |
+| `geo_url` | `https://ipwho.is/` | asked through the proxy where that IP is (city and coordinates for the map); empty = never |
 | `tcp_port`, `dns_port` | `47201`, `47253` | local ports the firewall redirects to |
 | `fwmark` | `0x5057` (20567) | firewall mark of the service's own sockets; change it only if it collides with other software |
 | `log_level` | `info` | `debug`, `info`, `warning` or `error` |
 
 With *Allow LAN* on, these ranges go out directly: `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `169.254.0.0/16`, multicast and broadcast, and for IPv6 `fc00::/7`, `fe80::/10`, `ff01::/16`, `ff02::/16`.
+
+### Location
+
+The flag, the map and the coordinates describe the public IP address your traffic comes out of, not you. Two requests, both sent **through the proxy**, feed them:
+
+1. `ip_check_url` returns the address and its country (this picks the flag).
+2. `geo_url` returns the city and coordinates. It is asked again only when the address changes. Any service that answers with JSON containing `latitude`/`longitude` (or `lat`/`lon`, or `loc`) works: `https://ipwho.is/`, `https://ipinfo.io/json`, `http://ip-api.com/json`.
+
+If `geo_url` is empty or does not answer, the map points at the capital of the country and the coordinates are prefixed with `≈`. That table is part of the package, so nothing is requested. With `ip_check_url` empty nothing is looked up at all and the location stays blank.
 
 ### Exclusion syntax
 
@@ -59,7 +69,8 @@ Examples:
 ```sh
 proxywall set-proxy 'socks5://alice:s3cret@192.168.1.5:1080'
 proxywall config remote_dns=9.9.9.9 log_level=debug
-proxywall config ip_check_url=            # never look up the public IP
+proxywall config ip_check_url=            # never look up the public IP (and no location)
+proxywall config geo_url=                 # no city lookup: the map shows the country's capital
 proxywall config 'direct_dns=["192.168.1.1"]'
 proxywall status --json | jq .state
 ```

@@ -34,6 +34,7 @@
 - **بدون نشت `DNS`:** نام سایت‌ها را خودِ پروکسی پیدا می‌کند.
 - **فهرست استثنا:** دامنه (`*.ir`)، یک `IP`، یا یک شبکه (`10.1.0.0/16`) که باید مستقیم بروند.
 - **پروکسی `SOCKS5` و `HTTP`** با نام کاربری و رمز اختیاری.
+- **نمایش محل خروج:** پرچم کشور، شهر، یک نقشه‌ی کوچک و مختصات `IP` بیرونی در پنجره دیده می‌شود. وقتی وصل هستید، آیکون کنار ساعت هم پرچم همان کشور با قاب سبز می‌شود.
 - **پنجره‌ی ساده، آیکون کنار ساعت، و دستور خط فرمان.**
 
 ## نصب
@@ -45,7 +46,7 @@
 </div>
 
 ```sh
-sudo apt install ./proxywall_1.0.0_all.deb
+sudo apt install ./proxywall_1.1.0_all.deb
 ```
 
 <div dir="rtl">
@@ -58,7 +59,7 @@ sudo apt install ./proxywall_1.0.0_all.deb
 git clone https://github.com/ArefMousakhani/proxywall.git
 cd proxywall
 make deb
-sudo apt install ./dist/proxywall_1.0.0_all.deb
+sudo apt install ./dist/proxywall_1.1.0_all.deb
 ```
 
 <div dir="rtl">

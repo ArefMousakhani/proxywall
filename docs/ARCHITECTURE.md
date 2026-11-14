@@ -96,6 +96,8 @@ Whenever the firewall is applied, the same rule set is written to `/var/lib/prox
 
 `monitor.py` probes the proxy (TCP connect; for SOCKS5 also the authentication handshake) every 10 s while it is reachable and every 3 s while it is not. It drives the status shown in the interface and nothing else. Routing never depends on it.
 
+The monitor also asks, through the proxy, for the public IP (`ip_check_url`, every 15 minutes) and, when that address changes, for its city and coordinates (`geo_url`). `geo.py` parses the replies and falls back to the capital of the country from `geodata.py`, a generated table that also holds the 75×28 land grid the interface draws its map from. The interface composes the flag tray icon itself and keeps it in `~/.cache/proxywall/`.
+
 ## Control protocol
 
 Newline-delimited JSON over the Unix socket:
@@ -129,5 +131,6 @@ Commands: `status`, `connect`, `disconnect`, `get_config`, `set_config`, `logs`,
 | `upstream.py` | SOCKS5 and HTTP CONNECT |
 | `rules.py`, `config.py` | exclusion matching, settings validation |
 | `monitor.py` | proxy health and public IP |
+| `geo.py`, `geodata.py` | location of the public IP: reply parsing, country table, map grid |
 | `control.py`, `client.py` | control socket, both ends |
 | `cli.py`, `gui/` | user interfaces |

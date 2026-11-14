@@ -4,6 +4,15 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.1.0] - 2026-11-14
+
+### Added
+
+- The window shows where your traffic comes out: country flag, city, a small world map and the coordinates.
+- The tray icon becomes the flag of that country, in a green frame, while connected.
+- `proxywall status` prints the location; the status reply carries `country_name`, `city`, `latitude`, `longitude` and `location_exact`.
+- New setting `geo_url` (default `https://ipwho.is/`), asked through the proxy for the city and coordinates of the public IP. When it is empty or the service does not answer, the capital of the country is shown instead, from a table shipped with the package.
+
 ## [1.0.0] - 2026-11-14
 
 First release.
@@ -19,4 +28,5 @@ First release.
 - GTK 3 desktop interface with tray icon, `proxywall` command line tool.
 - Debian package with a sandboxed systemd service.
 
+[1.1.0]: https://github.com/ArefMousakhani/proxywall/releases/tag/v1.1.0
 [1.0.0]: https://github.com/ArefMousakhani/proxywall/releases/tag/v1.0.0

@@ -22,3 +22,14 @@ License: MIT
  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  THE SOFTWARE.
+
+Files: data/flags/*
+Copyright: 2013 Panayiotis Lipiridis
+License: MIT
+Comment: Rendered from the flag-icons project, https://github.com/lipis/flag-icons
+
+Files: proxywall/geodata.py
+Copyright: none
+License: public-domain
+ Generated from Natural Earth (https://www.naturalearthdata.com) and the
+ tz database (https://www.iana.org/time-zones), both in the public domain.

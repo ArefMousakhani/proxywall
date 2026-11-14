@@ -5,15 +5,12 @@ down: routing is decided by the firewall and stays closed regardless.
 """
 
 import asyncio
-import ipaddress
-import json
 import logging
-import re
 import ssl
 import time
 from urllib.parse import urlsplit
 
-from . import upstream
+from . import geo, upstream
 from .resolver import ResolveError
 
 log = logging.getLogger("proxywall.monitor")
@@ -25,28 +22,8 @@ IP_REFRESH = 900.0
 
 def parse_ip_reply(body):
     """Extract (ip, country) from a Cloudflare trace, JSON or plain-text reply."""
-    ip = country = None
-    trace_ip = re.search(r"^ip=(\S+)$", body, re.M)
-    if trace_ip:
-        ip = trace_ip.group(1)
-        loc = re.search(r"^loc=(\S+)$", body, re.M)
-        country = loc.group(1) if loc else None
-    else:
-        text = body.strip()
-        try:
-            data = json.loads(text)
-            if isinstance(data, dict):
-                ip = data.get("ip") or data.get("query")
-                country = data.get("country_code") or data.get("countryCode") or data.get("country")
-        except ValueError:
-            ip = text
-    try:
-        ip = str(ipaddress.ip_address(str(ip).strip()))
-    except ValueError:
-        return None, None
-    if not isinstance(country, str) or not re.fullmatch(r"[A-Za-z]{2}", country):
-        country = None
-    return ip, (country.upper() if country else None)
+    reply = geo.parse_reply(body)
+    return reply["ip"], reply["country"]
 
 
 class Monitor:
@@ -58,6 +35,7 @@ class Monitor:
         self.last_error = None
         self.public_ip = None
         self.country = None
+        self._geo = None  # last geo-IP answer; kept while the public IP stays the same
         self._task = None
         self._wake = asyncio.Event()
         self._ip_task = None
@@ -92,6 +70,11 @@ class Monitor:
     def refresh_ip(self):
         self._ip_at = 0.0
         self._wake.set()
+
+    def location(self):
+        """Country, city and coordinates of the public IP, for the status reply."""
+        found = self._geo if self._geo and self._geo["ip"] == self.public_ip else None
+        return geo.describe(self.country, found)
 
     def _set(self, state):
         if state != self.state:
@@ -149,15 +132,34 @@ class Monitor:
 
     async def _lookup_ip(self, url):
         try:
-            body = await asyncio.wait_for(fetch(self.core, url), 15)
-            ip, country = parse_ip_reply(body)
-            if ip and self.state == "connected":
-                self.public_ip, self.country = ip, country
+            reply = geo.parse_reply(await asyncio.wait_for(fetch(self.core, url), 15))
+            ip = reply["ip"]
+            if not ip or self.state != "connected":
+                return
+            self.public_ip, self.country = ip, reply["country"]
+            if self._geo and self._geo["ip"] == ip:
+                self.country = self.country or self._geo["country"]
+                return
+            if reply["latitude"] is None and self.core.cfg["geo_url"]:
+                reply = await self._lookup_geo(self.core.cfg["geo_url"])
+            if reply["latitude"] is not None and self.public_ip == ip:
+                self._geo = dict(reply, ip=ip)
+                self.country = self.country or reply["country"]
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             log.debug("public IP lookup failed: %s", exc or type(exc).__name__)
             self._ip_at = time.monotonic() - IP_REFRESH + 30  # retry in 30 s
+
+    async def _lookup_geo(self, url):
+        """The location is decoration: failing to get it is never an error."""
+        try:
+            return geo.parse_reply(await asyncio.wait_for(fetch(self.core, url), 15))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.debug("location lookup failed: %s", exc or type(exc).__name__)
+            return geo.parse_reply("")
 
 
 async def fetch(core, url):

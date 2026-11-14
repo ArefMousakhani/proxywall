@@ -12,8 +12,9 @@ import subprocess
 import tempfile
 import unittest
 
-from proxywall import config, dnsmsg, firewall, upstream
+from proxywall import config, dnsmsg, firewall, geo, monitor, upstream
 from proxywall.fakeip import FakeIPPool
+from proxywall.geodata import COUNTRIES, LAND
 from proxywall.monitor import parse_ip_reply
 from proxywall.rules import ExcludeRules, is_local_name, normalize_entry, normalize_list
 from proxywall.tproxy import parse_http_host, parse_sni
@@ -220,6 +221,143 @@ class IpReplyTest(unittest.TestCase):
         self.assertEqual(parse_ip_reply("203.0.113.9\n"), ("203.0.113.9", None))
         self.assertEqual(parse_ip_reply('{"ip": "2001:db8::1", "country_code": "nl"}'), ("2001:db8::1", "NL"))
         self.assertEqual(parse_ip_reply("<html>blocked</html>"), (None, None))
+
+
+class GeoTest(unittest.TestCase):
+    IPWHO = json.dumps({"ip": "203.0.113.9", "success": True, "country": "Australia", "country_code": "AU",
+                        "city": "Brisbane", "latitude": -27.4679371, "longitude": 153.0280882})
+
+    def test_reply_formats(self):
+        self.assertEqual(geo.parse_reply(self.IPWHO), {
+            "ip": "203.0.113.9", "country": "AU", "city": "Brisbane", "latitude": -27.4679, "longitude": 153.0281})
+        ipinfo = geo.parse_reply('{"ip": "203.0.113.9", "city": "Brisbane", "country": "AU", '
+                                 '"loc": "-27.4679,153.0281"}')
+        self.assertEqual((ipinfo["latitude"], ipinfo["longitude"], ipinfo["country"]), (-27.4679, 153.0281, "AU"))
+        ip_api = geo.parse_reply('{"status": "success", "query": "203.0.113.9", "countryCode": "DE", '
+                                 '"city": "Frankfurt am Main", "lat": 50.11, "lon": 8.68}')
+        self.assertEqual((ip_api["ip"], ip_api["country"], ip_api["latitude"]), ("203.0.113.9", "DE", 50.11))
+        trace = geo.parse_reply("ip=203.0.113.9\nloc=NL\n")
+        self.assertEqual((trace["country"], trace["latitude"]), ("NL", None))
+
+    def test_bad_replies_are_harmless(self):
+        nothing = dict.fromkeys(("ip", "country", "city", "latitude", "longitude"))
+        for body in ("", "<html>", "[1, 2]", '{"success": false, "ip": "203.0.113.9"}',
+                     '{"status": "fail", "query": "203.0.113.9"}', '{"ip": "not an address"}'):
+            self.assertEqual(geo.parse_reply(body), nothing, body)
+        for junk in ('"latitude": 91, "longitude": 10', '"latitude": 0, "longitude": 0', '"latitude": "x"',
+                     '"latitude": true, "longitude": 1', '"latitude": NaN, "longitude": 1', '"loc": "1"',
+                     '"latitude": 10, "longitude": 181'):
+            reply = geo.parse_reply('{"ip": "203.0.113.9", %s}' % junk)
+            self.assertEqual((reply["ip"], reply["latitude"], reply["longitude"]), ("203.0.113.9", None, None), junk)
+        city = geo.parse_reply(json.dumps({"ip": "203.0.113.9", "city": "A\x1b[31m\n" + "b" * 200}))["city"]
+        self.assertTrue(city.isprintable() and len(city) <= 60)
+
+    def test_describe_and_formatting(self):
+        exact = geo.describe("AU", geo.parse_reply(self.IPWHO))
+        self.assertEqual((exact["country_name"], exact["city"], exact["location_exact"]),
+                         ("Australia", "Brisbane", True))
+        fallback = geo.describe("AU")
+        self.assertEqual((fallback["city"], fallback["location_exact"]), (None, False))
+        self.assertEqual((fallback["latitude"], fallback["longitude"]), COUNTRIES["AU"][1:])
+        unknown = geo.describe("ZZ")
+        self.assertEqual((unknown["country"], unknown["country_name"], unknown["latitude"]), ("ZZ", None, None))
+        self.assertIsNone(geo.describe(None)["latitude"])
+        self.assertEqual(geo.format_coordinates(-27.4679, 153.0281), "27.47° S, 153.03° E")
+        self.assertEqual(geo.format_coordinates(50.11, -8.68), "50.11° N, 8.68° W")
+        self.assertEqual(geo.format_place(exact), "Brisbane, Australia")
+        self.assertEqual(geo.format_place(fallback), "Australia")
+        self.assertEqual(geo.format_place(unknown), "ZZ")
+        self.assertIsNone(geo.format_place({}))
+
+    def test_generated_data(self):
+        self.assertTrue(all(len(row) == geo.MAP_COLS and set(row) <= {"#", "."} for row in LAND))
+        for code, (name, latitude, longitude) in COUNTRIES.items():
+            self.assertRegex(code, r"^[A-Z]{2}$")
+            self.assertTrue(name and -90 <= latitude <= 90 and -180 <= longitude <= 180, code)
+        flags = os.path.join(os.path.dirname(__file__), "..", "data", "flags")
+        missing = [code for code in COUNTRIES if not os.path.exists(os.path.join(flags, code.lower() + ".png"))]
+        self.assertEqual(missing, [])
+
+    def test_map_cells(self):
+        def is_land(latitude, longitude):
+            column, row = geo.map_cell(latitude, longitude)
+            return LAND[min(int(row), geo.MAP_ROWS - 1)][min(int(column), geo.MAP_COLS - 1)] == "#"
+
+        for name, latitude, longitude in (("Tehran", 35.7, 51.4), ("Frankfurt", 50.1, 8.7), ("Denver", 39.7, -105.0),
+                                          ("Brasilia", -15.8, -47.9), ("Alice Springs", -23.7, 133.9),
+                                          ("Novosibirsk", 55.0, 82.9), ("Anadyr", 64.7, 177.5)):
+            self.assertTrue(is_land(latitude, longitude), name)
+        for name, latitude, longitude in (("Atlantic", 30.0, -45.0), ("Pacific", 0.0, -140.0), ("Indian", -30.0, 80.0)):
+            self.assertFalse(is_land(latitude, longitude), name)
+        for latitude, longitude in ((90, 0), (-90, 0), (0, 180), (0, -180), (0, 191.99), (0, -168)):
+            column, row = geo.map_cell(latitude, longitude)
+            self.assertTrue(0 <= column <= geo.MAP_COLS and 0 <= row <= geo.MAP_ROWS)
+
+
+class MonitorLocationTest(unittest.TestCase):
+    """The lookup order: public IP first, then where it is, with a quiet fallback."""
+
+    class Core:
+        cfg = {"ip_check_url": "http://ip.test/", "geo_url": "http://geo.test/"}
+
+    def lookup(self, replies, ip_reply="ip=203.0.113.9\nloc=AU\n", watcher=None):
+        calls = []
+
+        async def fake_fetch(_core, url):
+            calls.append(url)
+            reply = ip_reply if url == "http://ip.test/" else replies.pop(0)
+            if isinstance(reply, Exception):
+                raise reply
+            return reply
+
+        async def scenario():
+            watch = watcher or monitor.Monitor(self.Core())
+            watch.state = "connected"
+            original, monitor.fetch = monitor.fetch, fake_fetch
+            try:
+                await watch._lookup_ip("http://ip.test/")
+            finally:
+                monitor.fetch = original
+            return watch
+
+        return run(scenario()), calls
+
+    def test_city_from_the_geo_service(self):
+        watch, calls = self.lookup([GeoTest.IPWHO])
+        self.assertEqual(calls, ["http://ip.test/", "http://geo.test/"])
+        self.assertEqual(watch.public_ip, "203.0.113.9")
+        place = watch.location()
+        self.assertEqual((place["country"], place["city"], place["latitude"], place["location_exact"]),
+                         ("AU", "Brisbane", -27.4679, True))
+        _, again = self.lookup([], watcher=watch)   # same address: not asked a second time
+        self.assertEqual(again, ["http://ip.test/"])
+        watch.public_ip = "198.51.100.1"            # another address: the old answer no longer applies
+        self.assertFalse(watch.location()["location_exact"])
+
+    def test_capital_when_the_geo_service_fails(self):
+        for failure in (OSError("down"), "<html>rate limited</html>", '{"success": false}'):
+            watch, _ = self.lookup([failure])
+            place = watch.location()
+            self.assertEqual(watch.public_ip, "203.0.113.9")
+            self.assertEqual((place["country_name"], place["city"], place["location_exact"]), ("Australia", None, False))
+            self.assertEqual((place["latitude"], place["longitude"]), COUNTRIES["AU"][1:])
+
+    def test_geo_lookup_can_be_turned_off(self):
+        core = type("Core", (), {"cfg": {"ip_check_url": "http://ip.test/", "geo_url": ""}})()
+        watch, calls = self.lookup([], watcher=monitor.Monitor(core))
+        self.assertEqual(calls, ["http://ip.test/"])
+        self.assertEqual(watch.location()["country"], "AU")
+
+    def test_one_service_can_answer_both(self):
+        watch, calls = self.lookup([], ip_reply=GeoTest.IPWHO)
+        self.assertEqual(calls, ["http://ip.test/"])
+        self.assertEqual(watch.location()["city"], "Brisbane")
+
+    def test_nothing_is_shown_once_disconnected(self):
+        watch, _ = self.lookup([GeoTest.IPWHO])
+        watch.public_ip = watch.country = None
+        place = watch.location()
+        self.assertEqual((place["country"], place["latitude"], place["city"]), (None, None, None))
 
 
 class FirewallRenderTest(unittest.TestCase):

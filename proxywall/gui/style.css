@@ -93,6 +93,11 @@
     font-weight: 600;
 }
 
+.pw-value.pw-dim {
+    color: #8f9bb3;
+    font-weight: 400;
+}
+
 .pw-row-title {
     font-size: 14px;
     font-weight: 700;

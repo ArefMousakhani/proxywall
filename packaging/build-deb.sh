@@ -19,6 +19,7 @@ umask 022
 install -d "$pkg/DEBIAN" "$pkg/usr/bin" "$pkg/usr/lib/proxywall/proxywall/gui" \
     "$pkg/usr/lib/systemd/system" "$pkg/usr/share/applications" \
     "$pkg/usr/share/icons/hicolor/scalable/apps" "$pkg/usr/share/proxywall/icons" \
+    "$pkg/usr/share/proxywall/flags" \
     "$pkg/usr/share/doc/proxywall"
 
 install -m 644 "$root"/proxywall/*.py "$pkg/usr/lib/proxywall/proxywall/"
@@ -29,6 +30,7 @@ install -m 644 "$root/data/proxywall.service" "$pkg/usr/lib/systemd/system/"
 install -m 644 "$root/data/io.github.proxywall.ProxyWall.desktop" "$pkg/usr/share/applications/"
 install -m 644 "$root/data/icons/proxywall.svg" "$pkg/usr/share/icons/hicolor/scalable/apps/"
 install -m 644 "$root"/data/icons/*.svg "$pkg/usr/share/proxywall/icons/"
+install -m 644 "$root"/data/flags/*.png "$pkg/usr/share/proxywall/flags/"
 install -m 644 "$root/README.md" "$root"/docs/*.md "$pkg/usr/share/doc/proxywall/"
 install -m 644 "$here/debian/copyright" "$pkg/usr/share/doc/proxywall/copyright"
 gzip -9n -c "$root/CHANGELOG.md" > "$pkg/usr/share/doc/proxywall/changelog.gz"

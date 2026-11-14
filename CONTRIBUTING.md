@@ -29,6 +29,9 @@ starts the service with `PROXYWALL_FIREWALL=none` (no privileges, nothing is
 captured or blocked) and opens the window against it. `make screenshots`
 renders every state to `docs/images/` without opening a window.
 
+`proxywall/geodata.py` (country table, map grid) and `data/flags/` are generated:
+see the headers of `tools/gen_geodata.py` and `tools/gen_flags.py`.
+
 ## Rules of the house
 
 - **Fail closed.** No change may add a path where traffic leaves directly

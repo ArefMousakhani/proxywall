@@ -16,6 +16,11 @@ ProxyWall turns a plain proxy (`192.168.1.5:1080`, a proxy shared from your phon
   <img src="docs/images/settings.png" width="240" alt="ProxyWall settings: proxy address and bypass list">
 </p>
 
+<p align="center">
+  <img src="docs/images/tray.png" width="190" alt="ProxyWall tray icon: the flag of the country your traffic comes out in, with a green frame">
+  <br><sub>While connected, the tray icon is the flag of the country your traffic comes out in.</sub>
+</p>
+
 ## The problem it solves
 
 You have a proxy, not a VPN, and you want the *whole computer* to use it:
@@ -45,6 +50,7 @@ ProxyWall fixes all five with one switch.
 - **Exclusion list (split tunnelling).** Domains (`*.ir`, `example.com`), single addresses and networks (`10.1.0.0/16`) that should bypass the proxy.
 - **SOCKS5 and HTTP CONNECT** proxies, with optional username and password.
 - **Small and auditable.** Pure Python standard library plus `nftables`; no bundled binaries. The privileged service runs with a single capability inside a systemd sandbox.
+- **See where you come out.** The window shows the country flag, city, a small world map and the coordinates of your public IP; the tray icon turns into that country's flag while you are connected.
 - **Desktop app, tray icon and CLI.**
 
 ## Install
@@ -54,7 +60,7 @@ Requirements: a systemd-based distribution with Python ≥ 3.10, `nftables` and 
 **From a release (Debian, Ubuntu, Linux Mint):** download `proxywall_<version>_all.deb` from the [latest release](https://github.com/ArefMousakhani/proxywall/releases/latest), then
 
 ```sh
-sudo apt install ./proxywall_1.0.0_all.deb
+sudo apt install ./proxywall_1.1.0_all.deb
 ```
 
 **From source:**
@@ -63,7 +69,7 @@ sudo apt install ./proxywall_1.0.0_all.deb
 git clone https://github.com/ArefMousakhani/proxywall.git
 cd proxywall
 make deb
-sudo apt install ./dist/proxywall_1.0.0_all.deb
+sudo apt install ./dist/proxywall_1.1.0_all.deb
 ```
 
 `apt` pulls in the few dependencies (`python3-gi`, `nftables`, …), starts the `proxywall` service and adds **ProxyWall** to the application menu (*Internet* category).
@@ -76,7 +82,7 @@ sudo apt install ./dist/proxywall_1.0.0_all.deb
 
 | The window says | Meaning |
 | --- | --- |
-| **CONNECTED** (green) | Everything goes through the proxy. |
+| **CONNECTED** (green) | Everything goes through the proxy. The map and the flag show where it comes out. |
 | **CONNECTING** (amber) | Waiting for the proxy to answer. Traffic is already blocked from going out directly. |
 | **NO PROXY** (red) | The proxy cannot be reached. Traffic is blocked until it is back; ProxyWall keeps retrying every few seconds. |
 | **BLOCKED** (red) | You are disconnected and the *Firewall* switch is on: nothing leaves the machine. |
@@ -176,7 +182,7 @@ The service and the command line work everywhere. The window is GTK 3 and runs o
 - The service (`proxywalld`) runs as root with **only `CAP_NET_ADMIN`**, under systemd sandboxing (`ProtectSystem=strict`, `NoNewPrivileges`, system-call filter, no access to `/home`).
 - It is controlled over a Unix socket. Root and regular login accounts may use it; system and service accounts may not. See [SECURITY.md](SECURITY.md).
 - The proxy password is stored in `/var/lib/proxywall/config.json`, readable by root only, and is never sent back to the interface.
-- The public IP shown in the window is fetched through the proxy from `https://www.cloudflare.com/cdn-cgi/trace`. Set `ip_check_url` to an empty value to turn that off.
+- The public IP shown in the window is fetched through the proxy from `https://www.cloudflare.com/cdn-cgi/trace`, and its city and coordinates from `https://ipwho.is/`. Both requests travel through the proxy, so those services see the proxy's address, not yours. Set `geo_url` to an empty value to skip the second one (the map then shows the capital of the country), or `ip_check_url` to turn both off.
 
 ## Troubleshooting
 
@@ -210,3 +216,5 @@ sudo apt purge proxywall      # also deletes the saved settings
 ## License
 
 [MIT](LICENSE)
+
+The flag images come from [flag-icons](https://github.com/lipis/flag-icons) (MIT). The country table and the map are derived from [Natural Earth](https://www.naturalearthdata.com) and the tz database (public domain).

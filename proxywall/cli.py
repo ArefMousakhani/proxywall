@@ -7,7 +7,7 @@ import subprocess
 import sys
 import time
 
-from . import __version__, config
+from . import __version__, config, geo
 from .client import Client, DaemonError, DaemonUnavailable
 from .firewall import TABLE
 
@@ -49,6 +49,12 @@ def cmd_status(client, args):
         ip = status.get("public_ip")
         if ip:
             print(f"Public IP    {ip}" + (f" ({status['country']})" if status.get("country") else ""))
+        place = geo.format_place(status)
+        if place and status.get("latitude") is not None:
+            coordinates = geo.format_coordinates(status["latitude"], status["longitude"])
+            print(f"Location     {place} ({'' if status.get('location_exact') else 'about '}{coordinates})")
+        elif place:
+            print(f"Location     {place}")
         if status.get("latency_ms") is not None:
             print(f"Latency      {status['latency_ms']} ms")
     print(f"Kill switch  {'on' if status['kill_switch'] else 'off'}")

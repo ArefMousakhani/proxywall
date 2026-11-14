@@ -215,7 +215,7 @@ class Core:
             "since": monitor.since if self.enabled else None,
             "latency_ms": monitor.latency_ms,
             "public_ip": monitor.public_ip,
-            "country": monitor.country,
+            **monitor.location(),
             "error": self.error or self.config_error or (monitor.last_error if self.enabled else None),
             "stats": dict(self.stats),
             "excluded": len(self.cfg["exclude"]),

@@ -248,8 +248,15 @@ class ServerConfigTest(unittest.TestCase):
         with self.assertRaises(config.ConfigError):
             config.validate({"engine_path": "xray"})
         rules = firewall.render(47201, 47253, 0x5057, [], [], engine_port=47210)
-        self.assertIn("tcp dport 47210 meta mark != 0x5057 reject with tcp reset", rules)
-        self.assertLess(rules.index("tcp dport 47210"), rules.index('iifname "lo" accept'))
+        guard = ("fib daddr type local tcp dport 47210 tcp flags & (fin | syn | rst | ack) == syn "
+                 "meta mark != 0x5057 reject with tcp reset")
+        self.assertIn(guard, rules)
+        # Decided where the connection leaves its program, not on the way back in:
+        # other firewalls may rewrite the mark in between.
+        output = rules[rules.index("chain killswitch_local"):rules.index("chain killswitch_forwarded")]
+        self.assertIn(guard, output)
+        self.assertLess(output.index(guard), output.index('oifname "lo" accept'))
+        self.assertNotIn("meta mark", rules[rules.index("chain guard_ports"):rules.index("chain killswitch_local")])
 
 
 class HttpLatencyTest(unittest.TestCase):
@@ -394,7 +401,8 @@ class ServerListTest(unittest.TestCase):
 
     def test_helper_ports_are_a_guarded_range(self):
         rules = firewall.render(47201, 47253, 0x5057, [], [], engine_port=47210, engine_ports=config.ENGINE_PORTS)
-        self.assertIn("tcp dport 47210-47219 meta mark != 0x5057 reject", rules)
+        self.assertIn("tcp dport 47210-47219 tcp flags & (fin | syn | rst | ack) == syn meta mark != 0x5057 reject",
+                      rules)
         for clash in ({"tcp_port": 47215}, {"dns_port": 47219}, {"engine_port": 65530}):
             with self.assertRaises(config.ConfigError, msg=clash):
                 config.validate(clash)

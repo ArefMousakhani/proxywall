@@ -47,7 +47,7 @@
 </div>
 
 ```sh
-sudo apt install ./proxywall_1.3.0_all.deb
+sudo apt install ./proxywall_1.3.1_all.deb
 ```
 
 <div dir="rtl">
@@ -60,7 +60,7 @@ sudo apt install ./proxywall_1.3.0_all.deb
 git clone https://github.com/ArefMousakhani/proxywall.git
 cd proxywall
 make deb
-sudo apt install ./dist/proxywall_1.3.0_all.deb
+sudo apt install ./dist/proxywall_1.3.1_all.deb
 ```
 
 <div dir="rtl">

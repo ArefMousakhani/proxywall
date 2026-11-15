@@ -63,6 +63,8 @@ The reason is shown under the status and in `proxywall logs`.
 | `needs Xray, which is not installed` | install Xray, or point `engine_path` at it (README, *Other protocols*) |
 | `... links are not supported` | Hysteria, TUIC, WireGuard and NaiveProxy need a different program; run that client yourself and give ProxyWall its SOCKS5 port |
 | `no answer through the server` | the helper runs but nothing comes back: wrong id/password in the link, the server is down, or it blocks DNS to `remote_dns` (try `proxywall config remote_dns=8.8.8.8`) |
+| a link works in another app but not here | the installed Xray may be too old for what the link uses: compare `xray version` with the [latest release](https://github.com/XTLS/Xray-core/releases) and update it |
+| `the helper is running but its local port does not answer` | something on this machine stands between the service and its helper on `127.0.0.1` (ports `engine_port` to `engine_port+9`) |
 | `the server rejected the username, password or key` | SSH login failed |
 | `the server's host key has changed` | the SSH server is not the one seen the first time; if that is expected, `sudo rm /var/lib/proxywall/known_hosts` |
 

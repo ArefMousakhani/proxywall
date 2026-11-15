@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.3.1] - 2026-11-15
+
+### Fixed
+
+- SSH and share-link servers (VLESS, VMess, Trojan, Shadowsocks) did not connect on machines where another firewall rewrites packet marks on incoming traffic, as VPN clients do: ProxyWall's own rule refused the service's connection to its helper, so the server showed "the tunnel is starting" and tests ended with "the helper did not start". The rule that keeps other programs away from the helper's local port is now applied where connections leave a program, like the kill switch itself.
+- That rule no longer resets the answer to an unrelated local connection whose own port happened to fall in the helper range.
+
 ## [1.3.0] - 2026-11-15
 
 ### Added
@@ -53,6 +60,7 @@ First release.
 - GTK 3 desktop interface with tray icon, `proxywall` command line tool.
 - Debian package with a sandboxed systemd service.
 
+[1.3.1]: https://github.com/ArefMousakhani/proxywall/releases/tag/v1.3.1
 [1.3.0]: https://github.com/ArefMousakhani/proxywall/releases/tag/v1.3.0
 [1.2.0]: https://github.com/ArefMousakhani/proxywall/releases/tag/v1.2.0
 [1.1.0]: https://github.com/ArefMousakhani/proxywall/releases/tag/v1.1.0

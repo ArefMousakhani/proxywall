@@ -773,6 +773,32 @@ class NetnsTest(unittest.TestCase):
             socket.create_connection(("127.0.0.1", port), timeout=3).close()
         self.assert_proxied("www.example.com")                  # while the daemon uses it happily
 
+    def test_47_helper_works_next_to_a_firewall_that_rewrites_marks(self):
+        # VPN clients restore connection marks on incoming packets, loopback
+        # included: the daemon's mark is gone by the time its connection to the
+        # helper arrives. The helper must stay usable, and stay private.
+        sh("nft -f - <<'EOF'\n"
+           "table inet foreign {\n"
+           "    chain incoming {\n        type filter hook prerouting priority mangle; policy accept;\n"
+           "        meta mark set 0x3214\n    }\n"
+           "    chain arriving {\n        type filter hook input priority mangle; policy accept;\n"
+           "        meta mark set 0x3214\n    }\n"
+           "}\nEOF")
+        self.addCleanup(sh, "nft delete table inet foreign", check=False)
+        self.start_xray_server()
+        self.use_link(self.share_links()["vless"])
+        self.assert_proxied("www.example.com")
+        port = self.client.get_config()["engine_port"]
+        with self.assertRaises(OSError):
+            socket.create_connection(("127.0.0.1", port), timeout=3).close()
+        self.configure(test_url="http://www.example.com/")
+        self.addCleanup(self.configure, test_url=config.DEFAULTS["test_url"])
+        active = self.client.status()["active_server"]              # the test helper has its own port
+        self.assertEqual(self.client.server_test([active]), 1)
+        self.wait_for(lambda: self.client.status()["tests"][active]["state"] == "done", "the server test", 60)
+        result = self.client.status()["tests"][active]
+        self.assertTrue(result["reach"], result)
+
     def test_42_dead_link_server_blocks_and_recovers(self):
         self.start_xray_server()
         self.use_link(self.share_links()["vless"])

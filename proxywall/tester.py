@@ -121,7 +121,7 @@ class Tester:
                 helper = Engine(core, port=port, quiet=True)
                 await helper.ensure(proxy)
                 if not helper.running:
-                    result["error"] = helper.error or "the helper did not start"
+                    result["error"] = helper.error or "the helper is running but its local port does not answer"
                     return
                 settings, addresses = helper.settings(proxy["type"]), ["127.0.0.1"]
             else:

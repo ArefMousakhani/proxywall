@@ -30,9 +30,14 @@ def render(tcp_port, dns_port, mark, bypass4=(), bypass6=(), engine_port=0, engi
     """Return the complete rule set as nft script text (an atomic replace)."""
     # The helper process (Xray, ssh) listens on loopback for the daemon alone:
     # a program that talked to it directly would skip exclusions and the country gate.
+    # Checked where the connection leaves its program (output), like the kill
+    # switch itself: on the way back in, other firewalls on the machine (VPN
+    # clients restoring connection marks) may already have rewritten the mark.
     ports = f"{engine_port}-{engine_port + engine_ports - 1}" if engine_ports > 1 else str(engine_port)
-    engine_guard = (f"        tcp dport {ports} meta mark != {mark:#x} reject with tcp reset\n"
-                    if engine_port else "")
+    # Only the opening packet: an answer to a program whose own port happens
+    # to fall in this range must pass.
+    engine_guard = (f"        fib daddr type local tcp dport {ports} tcp flags & (fin | syn | rst | ack) == syn "
+                    f"meta mark != {mark:#x} reject with tcp reset\n" if engine_port else "")
 
     def address_set(name, kind, elements):
         body = f"        type {kind}\n        flags interval\n        auto-merge\n"
@@ -67,7 +72,7 @@ table inet {TABLE} {{
     # The daemon's ports are reachable only by redirected connections.
     chain guard_ports {{
         type filter hook input priority filter; policy accept;
-{engine_guard}        iifname "lo" accept
+        iifname "lo" accept
         meta l4proto {{ tcp, udp }} th dport {{ {tcp_port}, {dns_port} }} ct status dnat accept
         meta l4proto {{ tcp, udp }} th dport {{ {tcp_port}, {dns_port} }} drop
     }}
@@ -75,7 +80,7 @@ table inet {TABLE} {{
     # Kill switch: nothing leaves unless it is the daemon, local, or excluded.
     chain killswitch_local {{
         type filter hook output priority filter; policy accept;
-        meta mark {mark:#x} accept
+{engine_guard}        meta mark {mark:#x} accept
         oifname "lo" accept
         fib daddr type local accept
         ip daddr @bypass4 accept

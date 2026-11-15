@@ -67,7 +67,7 @@ Requirements: a systemd-based distribution with Python ≥ 3.10, `nftables` and 
 **From a release (Debian, Ubuntu, Linux Mint):** download `proxywall_<version>_all.deb` from the [latest release](https://github.com/ArefMousakhani/proxywall/releases/latest), then
 
 ```sh
-sudo apt install ./proxywall_1.3.0_all.deb
+sudo apt install ./proxywall_1.3.1_all.deb
 ```
 
 **From source:**
@@ -76,7 +76,7 @@ sudo apt install ./proxywall_1.3.0_all.deb
 git clone https://github.com/ArefMousakhani/proxywall.git
 cd proxywall
 make deb
-sudo apt install ./dist/proxywall_1.3.0_all.deb
+sudo apt install ./dist/proxywall_1.3.1_all.deb
 ```
 
 `apt` pulls in the few dependencies (`python3-gi`, `nftables`, …), starts the `proxywall` service and adds **ProxyWall** to the application menu (*Internet* category).

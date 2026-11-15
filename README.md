@@ -11,11 +11,15 @@
 ProxyWall turns a plain proxy (`192.168.1.5:1080`, a proxy shared from your phone, an SSH tunnel, a V2Ray / Xray / sing-box / Shadowsocks local port, a corporate HTTP proxy…) into something that behaves like an always-on VPN client: every application is captured, DNS cannot leak, and a firewall kill switch keeps the machine closed whenever the proxy is unreachable. There is no "fall back to a direct connection".
 
 <p align="center">
-  <img src="docs/images/connected.png" width="760" alt="ProxyWall connected: status, map of the exit location, and the list of saved servers with ping and internet test results">
+  <img src="docs/images/connected.png" width="760" alt="ProxyWall connected: status, map of the exit location, the list of saved servers with ping and internet test results, and the open connections by site with an Exclude button">
 </p>
 <p align="center">
   <img src="docs/images/country-blocked.png" width="375" alt="ProxyWall blocking all traffic because the server comes out in a blocked country">
   <img src="docs/images/server-link.png" width="375" alt="ProxyWall server form: SOCKS5, HTTP, SSH or a VLESS / VMess / Trojan / Shadowsocks share link">
+</p>
+<p align="center">
+  <img src="docs/images/connected-light.png" width="760" alt="ProxyWall in its light look">
+  <br><sub>Light or dark: ProxyWall follows your desktop, or you choose in Settings.</sub>
 </p>
 <p align="center">
   <img src="docs/images/tray.png" width="190" alt="ProxyWall tray icon: the flag of the country your traffic comes out in, with a green frame">
@@ -49,6 +53,8 @@ ProxyWall fixes all five with one switch.
 - **Always-on mode.** With the *Firewall* switch on, the internet stays blocked while you are disconnected, including right after a reboot, before you log in.
 - **No DNS leaks.** Applications never learn real addresses for proxied sites; host names are resolved by the proxy.
 - **Exclusion list (split tunnelling).** Domains (`*.ir`, `example.com`), single addresses and networks (`10.1.0.0/16`) that should bypass the proxy.
+- **Open connections.** See which sites your programs are connected to at this moment, and exclude one with a click.
+- **Light and dark.** The window follows your desktop's light or dark setting, or the look you pick in *Settings → Appearance*.
 - **SOCKS5 and HTTP CONNECT** proxies, with optional username and password.
 - **SSH tunnels** (password or private key), using the system's OpenSSH.
 - **VLESS, VMess, Trojan and Shadowsocks** servers from a share link (`vless://`, `vmess://`, `trojan://`, `ss://`), including TLS, REALITY, XTLS-Vision, WebSocket, gRPC, HTTPUpgrade and XHTTP, through [Xray](https://github.com/XTLS/Xray-core).
@@ -67,7 +73,7 @@ Requirements: a systemd-based distribution with Python ≥ 3.10, `nftables` and 
 **From a release (Debian, Ubuntu, Linux Mint):** download `proxywall_<version>_all.deb` from the [latest release](https://github.com/ArefMousakhani/proxywall/releases/latest), then
 
 ```sh
-sudo apt install ./proxywall_1.3.1_all.deb
+sudo apt install ./proxywall_1.4.0_all.deb
 ```
 
 **From source:**
@@ -76,7 +82,7 @@ sudo apt install ./proxywall_1.3.1_all.deb
 git clone https://github.com/ArefMousakhani/proxywall.git
 cd proxywall
 make deb
-sudo apt install ./dist/proxywall_1.3.1_all.deb
+sudo apt install ./dist/proxywall_1.4.0_all.deb
 ```
 
 `apt` pulls in the few dependencies (`python3-gi`, `nftables`, …), starts the `proxywall` service and adds **ProxyWall** to the application menu (*Internet* category).
@@ -155,6 +161,8 @@ In *Settings → Bypass the proxy*, one entry per line:
 | `192.0.2.10` | one address |
 | `10.1.0.0/16`, `2001:db8::/32` | a network |
 
+The quick way: the **Open connections** box in the main window lists what your programs are connected to right now, one row per site (`mail.google.com` and `www.google.com` are one row, `google.com`), with the traffic of each and whether it is still connecting. **Exclude** on a row adds that site to the bypass list and saves it; its open connections are cut, and the program reconnects outside the proxy at once. `proxywall connections` prints the same list.
+
 Excluded destinations always go out directly, also while the firewall is blocking everything else. *Allow local network* does the same for private address ranges (your router, printer, NAS, and usually the proxy itself).
 
 ### Blocked countries
@@ -181,6 +189,7 @@ proxywall set-proxy socks5://user:pass@192.168.1.5:1080
 proxywall set-proxy 'vless://uuid@example.com:443?security=reality&pbk=...&type=tcp'   # or vmess:// trojan:// ss://
 proxywall set-proxy ssh://me@example.com --key ~/.ssh/id_ed25519
 proxywall exclude add '*.ir' 10.1.0.0/16
+proxywall connections            # what is open right now, by site
 proxywall block-country add IR
 proxywall server add 'trojan://secret@nl.example.net:443#Amsterdam' http://10.0.0.2:8080
 proxywall server test            # ping and internet check for every saved server

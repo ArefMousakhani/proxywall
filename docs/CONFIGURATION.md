@@ -100,6 +100,7 @@ proxywall lan on|off                 Allow LAN
 proxywall exclude list
 proxywall exclude add ENTRY...
 proxywall exclude remove ENTRY...
+proxywall connections                open connections by site: how many, connecting or open, proxy or direct, traffic
 proxywall block-country list|add|remove|codes [COUNTRY...]
 proxywall config [KEY=VALUE...]      show the configuration, or change any setting
 proxywall logs [-n COUNT]            recent service messages
@@ -132,5 +133,7 @@ systemctl status proxywall
 journalctl -u proxywall -e
 sudo systemctl restart proxywall     # safe: the firewall stays applied while it restarts
 ```
+
+*Settings → Appearance* chooses the look of the window: **System** (the default) follows the desktop's light or dark preference and changes with it, **Light** and **Dark** fix it. The choice applies at once and is kept per user in `~/.config/proxywall/gui.json`; it is not part of the service's configuration.
 
 The interface can start with your session: *Settings → Open at login* creates `~/.config/autostart/proxywall.desktop`. The connection itself does not depend on it; the service restores the last state at boot on its own.

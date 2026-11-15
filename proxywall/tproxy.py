@@ -9,11 +9,12 @@ import asyncio
 import logging
 import socket
 import struct
+import time
 
 from . import upstream
 from .fakeip import FakeIPPool
 from .resolver import ResolveError
-from .rules import is_hostname
+from .rules import base_domain, is_hostname
 
 log = logging.getLogger("proxywall.tcp")
 
@@ -22,6 +23,7 @@ BUFFER = 64 * 1024
 MAX_CONNECTIONS = 4096
 SNIFF_TIMEOUT = 1.0
 HALF_CLOSE_TIMEOUT = 120.0
+CONNECTION_ROWS = 100   # how many destinations the list of open connections reports
 _HTTP_METHODS = (b"GET ", b"POST ", b"HEAD ", b"PUT ", b"DELETE ", b"OPTIONS ", b"PATCH ")
 
 
@@ -133,6 +135,7 @@ class TransparentProxy:
         self._servers = []
         self._tasks = set()
         self._proxied = set()  # the subset of _tasks that goes (or is about to go) through the proxy
+        self._open = {}        # task -> what the connection is, for the list of open connections
         self.port = None
 
     @property
@@ -181,6 +184,47 @@ class TransparentProxy:
         for task in list(self._proxied if proxied_only else self._tasks):
             task.cancel()
 
+    def close_excluded(self):
+        """Cut proxied connections that the exclusion list now sends out directly.
+
+        The application opens them again at once, and this time they bypass
+        the proxy: an exclusion takes effect when it is made, not at the next visit.
+        """
+        rules = self.core.rules
+        for task, entry in list(self._open.items()):
+            if entry["direct"]:
+                continue
+            if rules.match_domain(entry["host"]) if entry["named"] else rules.match_ip(entry["host"]):
+                task.cancel()
+
+    def connections(self, limit=CONNECTION_ROWS):
+        """Open connections, one row per site and route, for people to read.
+
+        Host names are grouped under their domain (``mail.google.com`` and
+        ``www.google.com`` are one row); ``exclude`` is the entry that would
+        send the row out directly. Connections still waiting for the proxy
+        count as ``pending``.
+        """
+        groups = {}
+        for entry in self._open.values():
+            host = base_domain(entry["host"]) if entry["named"] else entry["host"]
+            key = (host, entry["direct"])
+            group = groups.get(key)
+            if group is None:
+                group = groups[key] = {"host": host, "route": "direct" if entry["direct"] else "proxy",
+                                       "exclude": host, "count": 0, "pending": 0, "up": 0, "down": 0,
+                                       "since": entry["since"], "names": set()}
+            group["count"] += 1
+            group["pending"] += entry["pending"]
+            group["up"] += entry["up"]
+            group["down"] += entry["down"]
+            group["since"] = min(group["since"], entry["since"])
+            group["names"].add(entry["host"])
+        rows = sorted(groups.values(), key=lambda group: (group["host"], group["route"]))[:limit]
+        for group in rows:
+            group["names"] = sorted(group["names"])[:8]
+        return rows
+
     async def _accept(self, reader, writer):
         task = asyncio.current_task()
         self._tasks.add(task)
@@ -198,6 +242,7 @@ class TransparentProxy:
             stats["active"] -= 1
             self._tasks.discard(task)
             self._proxied.discard(task)
+            self._open.pop(task, None)
 
     async def _handle(self, reader, writer):
         core = self.core
@@ -223,6 +268,7 @@ class TransparentProxy:
                 return
         first = b""
         direct = False
+        sniffed = None
         if name is not None:
             direct = core.rules.match_domain(name)
         elif core.rules.match_ip(ip):
@@ -233,6 +279,9 @@ class TransparentProxy:
             log.debug("sniffed %s for %s:%d", sniffed, ip, port)
 
         target = name or ip
+        entry = {"host": name or sniffed or ip, "named": bool(name or sniffed), "direct": direct,
+                 "pending": True, "since": time.time(), "up": 0, "down": 0}
+        self._open[asyncio.current_task()] = entry
         try:
             if direct:
                 up_sock, leftover = await self._dial_direct(target, port), b""
@@ -259,6 +308,7 @@ class TransparentProxy:
             return
 
         core.stats["direct" if direct else "proxied"] += 1
+        entry["pending"] = False
         log.debug("%s %s:%d", "direct" if direct else "proxy ", target, port)
         try:
             up_reader, up_writer = await asyncio.open_connection(sock=up_sock, limit=BUFFER)
@@ -270,7 +320,7 @@ class TransparentProxy:
                 writer.write(leftover)
             if first:
                 up_writer.write(first)
-            await self._relay(reader, writer, up_reader, up_writer)
+            await self._relay(reader, writer, up_reader, up_writer, entry)
         finally:
             for stream in (writer, up_writer):
                 if not stream.transport.is_closing():
@@ -290,7 +340,7 @@ class TransparentProxy:
                 error = exc
         raise error or OSError("no address")
 
-    async def _relay(self, c_reader, c_writer, u_reader, u_writer):
+    async def _relay(self, c_reader, c_writer, u_reader, u_writer, entry):
         stats = self.core.stats
 
         async def pipe(reader, writer, key):
@@ -300,6 +350,7 @@ class TransparentProxy:
                     break
                 writer.write(data)
                 stats[key] += len(data)
+                entry[key] += len(data)
                 await writer.drain()
             if writer.can_write_eof():
                 writer.write_eof()  # pass the half-close on

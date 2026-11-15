@@ -132,6 +132,24 @@ class DaemonTest(unittest.TestCase):
         self.assertIn(self.client.status()["state"], ("connecting", "unreachable"))
         self.client.disconnect()
 
+    def test_85_exclusions_by_command(self):
+        before = self.client.get_config()["exclude"]
+        self.assertEqual(self.client.status()["connections"], [])
+        added = self.client.exclude(add=["Example.com", "https://mail.example.org/inbox", "10.77.0.0/16"])
+        self.assertEqual(added["exclude"], before + ["example.com", "mail.example.org", "10.77.0.0/16"])
+        self.assertEqual(self.client.exclude(add=["example.com"])["exclude"], added["exclude"])   # once is enough
+        with self.assertRaises(DaemonError):
+            self.client.exclude(add=["not a domain"])
+        with self.assertRaises(DaemonError):
+            self.client.request("exclude", add="example.com")
+        self.assertEqual(self.client.get_config()["exclude"], added["exclude"])
+        self.assertEqual(self.cli("connections").stdout.strip(), "(no open connections)")
+        self.stop()                                              # saved: still there after a restart
+        self.start()
+        self.assertEqual(self.client.get_config()["exclude"], added["exclude"])
+        left = self.client.exclude(remove=["*.example.com", "mail.example.org", "10.77.0.0/16"])
+        self.assertEqual(left["exclude"], before)
+
     def test_8_saved_servers(self):
         for server in self.client.status()["servers"]:
             self.client.server_remove(server["id"])

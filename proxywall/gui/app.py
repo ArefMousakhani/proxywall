@@ -22,6 +22,7 @@ from .. import APP_ID, APP_NAME, __version__, config, geo, links  # noqa: E402
 from ..geodata import COUNTRIES, LAND  # noqa: E402
 from ..cli import human_bytes  # noqa: E402
 from ..client import Client, DaemonUnavailable  # noqa: E402
+from . import theme  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ICON_DIRS = (os.path.join(HERE, "..", "..", "data", "icons"), "/usr/share/proxywall/icons")
@@ -36,7 +37,21 @@ Icon=proxywall
 X-GNOME-Autostart-enabled=true
 """
 
-GREEN, AMBER, RED, GREY = (0.184, 0.831, 0.498), (0.965, 0.718, 0.235), (1.0, 0.42, 0.42), (0.47, 0.53, 0.64)
+# The state colours as the dark look draws them. They also name the state:
+# `tone()` gives the shade for the look that is on screen.
+GREEN, AMBER, RED, GREY = (theme.DRAWING["dark"][name] for name in ("on", "wait", "bad", "off"))
+_TONES = {GREEN: "on", AMBER: "wait", RED: "bad", GREY: "off"}
+_look = "dark"  # the look on screen, kept up to date by Appearance
+
+
+def tone(colour):
+    """A state colour in the shade of the current look."""
+    return theme.DRAWING[_look][_TONES[colour]] if colour in _TONES else colour
+
+
+def ink(alpha):
+    """The overlay colour of the current look (white on dark, navy on light) as r, g, b, a."""
+    return (*theme.DRAWING[_look]["ink"], alpha)
 
 # state -> (headline, css class, colour, tray icon, explanation)
 STATES = {
@@ -177,14 +192,15 @@ class WorldMap(Gtk.DrawingArea):
                     cx = left + (column + 0.5) * pitch
                     cr.new_sub_path()
                     cr.arc(cx, cy, radius, 0, 2 * math.pi)
-        cr.set_source_rgba(1, 1, 1, 0.20 if self._point else 0.13)
+        land = theme.DRAWING[_look]["land"]
+        cr.set_source_rgba(*ink(land + 0.07 if self._point else land))
         cr.fill()
         if self._point is None:
             return False
         column, row = geo.map_cell(*self._point)
         cx = min(max(left + column * pitch, 6), width - 6)
         cy = min(max(top + row * pitch, 6), height - 6)
-        r, g, b = self._colour
+        r, g, b = tone(self._colour)
         halo = cairo.RadialGradient(cx, cy, 2, cx, cy, 17)
         halo.add_color_stop_rgba(0, r, g, b, 0.45)
         halo.add_color_stop_rgba(1, r, g, b, 0.0)
@@ -195,7 +211,7 @@ class WorldMap(Gtk.DrawingArea):
         cr.set_line_width(1.2)
         cr.arc(cx, cy, 7.5, 0, 2 * math.pi)
         cr.stroke()
-        cr.set_source_rgb(0.055, 0.082, 0.149)
+        cr.set_source_rgb(*theme.DRAWING[_look]["gap"])
         cr.arc(cx, cy, 4.6, 0, 2 * math.pi)
         cr.fill()
         cr.set_source_rgb(r, g, b)
@@ -226,7 +242,7 @@ class FlagView(Gtk.DrawingArea):
         if self._pixbuf is not None:
             width, height = area.get_allocated_width(), area.get_allocated_height()
             _paint_flag(cr, self._pixbuf, 0, 0, width, height, 3.5)
-            cr.set_source_rgba(1, 1, 1, 0.18)
+            cr.set_source_rgba(*ink(0.18))
             cr.set_line_width(1)
             _rounded(cr, 0.5, 0.5, width - 1, height - 1, 3.5)
             cr.stroke()
@@ -279,10 +295,10 @@ class ServerRow(Gtk.ListBoxRow):
         width, height = area.get_allocated_width(), area.get_allocated_height()
         cr.arc(width / 2, height / 2, 6, 0, 2 * math.pi)
         if self._active:
-            cr.set_source_rgb(*GREEN)
+            cr.set_source_rgb(*tone(GREEN))
             cr.fill()
         else:
-            cr.set_source_rgba(1, 1, 1, 0.28)
+            cr.set_source_rgba(*ink(0.28))
             cr.set_line_width(1.5)
             cr.stroke()
         return False
@@ -331,6 +347,62 @@ class ServerRow(Gtk.ListBoxRow):
         self.reach.set_text(reach)
         self._tone(self.reach, reach_tone)
         self.reach.set_tooltip_text(tip)
+
+
+class ConnectionRow(Gtk.ListBoxRow):
+    """One site with open connections: how many, how much traffic, and a way to send it outside the proxy."""
+
+    def __init__(self, key, on_exclude):
+        super().__init__()
+        self.key = key
+        self.entry = None
+        self.set_activatable(False)
+        box = Gtk.Box(spacing=10)
+        text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        self.host = _label("", "pw-row-title", selectable=True)
+        self.host.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+        self.detail = _label("", "pw-key")
+        self.detail.set_ellipsize(Pango.EllipsizeMode.END)
+        text.pack_start(self.host, False, False, 0)
+        text.pack_start(self.detail, False, False, 0)
+        box.pack_start(text, True, True, 0)
+        self.traffic = _label("", "pw-key", 1.0)
+        self.traffic.set_valign(Gtk.Align.CENTER)
+        box.pack_start(self.traffic, False, False, 0)
+        self.button = Gtk.Button(label="Exclude")
+        self.button.get_style_context().add_class("pw-small")
+        self.button.set_valign(Gtk.Align.CENTER)
+        self.button.set_no_show_all(True)
+        self.button.connect("clicked", lambda *_: self.entry and on_exclude(self))
+        box.pack_start(self.button, False, False, 0)
+        self.direct = _label("Direct", "pw-key", 1.0)
+        self.direct.get_style_context().add_class("pw-good")
+        self.direct.set_tooltip_text("Excluded: these connections bypass the proxy")
+        self.direct.set_valign(Gtk.Align.CENTER)
+        self.direct.set_no_show_all(True)
+        box.pack_start(self.direct, False, False, 0)
+        self.add(box)
+        self.show_all()
+
+    def update(self, row):
+        self.entry = row["exclude"]
+        self.host.set_text(row["host"])
+        count, pending = row["count"], row["pending"]
+        detail = "1 connection" if count == 1 else f"{count} connections"
+        if pending == count:
+            detail += " · connecting…"
+        elif pending:
+            detail += f" · {pending} connecting"
+        else:
+            detail += " · open"
+        self.detail.set_text(detail)
+        names = [name for name in row.get("names") or [] if name != row["host"]]
+        self.set_tooltip_text("\n".join(names) or None)
+        self.traffic.set_text(f"↓ {human_bytes(row['down'])}   ↑ {human_bytes(row['up'])}")
+        direct = row["route"] == "direct"
+        self.button.set_visible(not direct)
+        self.button.set_tooltip_text(f"Let {row['exclude']} bypass the proxy from now on (saved in the bypass list)")
+        self.direct.set_visible(direct)
 
 
 class Worker:
@@ -404,7 +476,7 @@ class PowerButton(Gtk.Button):
         width, height = area.get_allocated_width(), area.get_allocated_height()
         cx, cy = width / 2, height / 2
         radius = min(width, height) / 2 - 20
-        r, g, b = self._colour
+        r, g, b = tone(self._colour)
         hover = bool(self.get_state_flags() & Gtk.StateFlags.PRELIGHT)
 
         if self._lit:  # soft halo
@@ -416,9 +488,7 @@ class PowerButton(Gtk.Button):
             cr.fill()
 
         disc = cairo.LinearGradient(0, cy - radius, 0, cy + radius)
-        top, bottom = (0.135, 0.185, 0.30), (0.085, 0.12, 0.205)
-        if hover:
-            top, bottom = (0.16, 0.215, 0.34), (0.10, 0.14, 0.235)
+        top, bottom = theme.DRAWING[_look]["disc_hover" if hover else "disc"]
         disc.add_color_stop_rgb(0, *top)
         disc.add_color_stop_rgb(1, *bottom)
         cr.set_source(disc)
@@ -428,7 +498,7 @@ class PowerButton(Gtk.Button):
         cr.set_line_width(5)
         cr.set_line_cap(cairo.LINE_CAP_ROUND)
         if self._spinning:
-            cr.set_source_rgba(1, 1, 1, 0.10)
+            cr.set_source_rgba(*ink(0.10))
             cr.new_sub_path()
             cr.arc(cx, cy, radius, 0, 2 * math.pi)
             cr.close_path()
@@ -494,6 +564,7 @@ class Panel:
         self._password_dirty = False
         self._loading = False
         self._rows = {}                # server id -> ServerRow
+        self._connections = {}         # (host, route) -> ConnectionRow
         self._row_order = None         # ids as last drawn, to notice when the list changes
         self._editing = None           # id of the server in the form; None while adding one
 
@@ -636,6 +707,7 @@ class Panel:
         frame.get_style_context().add_class("pw-textframe")
         scroller = Gtk.ScrolledWindow()
         scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroller.set_min_content_height(200)   # the larger share of the pane; open connections get the rest
         self.server_list = Gtk.ListBox()
         self.server_list.get_style_context().add_class("pw-servers")
         self.server_list.set_selection_mode(Gtk.SelectionMode.NONE)
@@ -652,7 +724,72 @@ class Panel:
         page.pack_start(frame, True, True, 0)
         page.pack_start(_label("Click a server to use it. A test measures the server itself (ping) and a small "
                                "page fetched through it (internet).", "pw-key", wrap=True), False, False, 0)
+
+        bar = Gtk.Box(spacing=8)
+        bar.set_margin_top(8)
+        bar.pack_start(_label("OPEN CONNECTIONS", "pw-section"), False, False, 0)
+        self.connections_count = _label("", "pw-key", 1.0)
+        bar.pack_end(self.connections_count, False, False, 0)
+        page.pack_start(bar, False, False, 0)
+        self.connections_note = _label("", "pw-error", wrap=True, selectable=True)
+        self.connections_note.set_no_show_all(True)
+        page.pack_start(self.connections_note, False, False, 0)
+        frame = Gtk.Box()
+        frame.get_style_context().add_class("pw-textframe")
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroller.set_min_content_height(110)
+        self.connection_list = Gtk.ListBox()
+        self.connection_list.get_style_context().add_class("pw-servers")
+        self.connection_list.get_style_context().add_class("pw-connections")
+        self.connection_list.set_selection_mode(Gtk.SelectionMode.NONE)
+        self.connection_list.set_sort_func(lambda first, second: (first.key > second.key) - (first.key < second.key))
+        self.connection_list.get_accessible().set_name("Open connections")
+        empty = _label("Nothing is open right now.", "pw-key", 0.5)
+        empty.set_margin_top(40)
+        empty.show()
+        self.connection_list.set_placeholder(empty)
+        scroller.add(self.connection_list)
+        frame.pack_start(scroller, True, True, 0)
+        page.pack_start(frame, True, True, 0)
+        page.pack_start(_label("What your programs are connected to at this moment. “Exclude” adds the site to the "
+                               "bypass list: it goes out directly, without the proxy.", "pw-key", wrap=True),
+                        False, False, 0)
         return page
+
+    def _render_connections(self, status):
+        rows = status.get("connections")
+        seen = set()
+        for row in rows or []:
+            key = (row["host"], row["route"])
+            seen.add(key)
+            widget = self._connections.get(key)
+            if widget is None:
+                widget = self._connections[key] = ConnectionRow(key, self._on_exclude)
+                self.connection_list.add(widget)
+            widget.update(row)
+        for key in [key for key in self._connections if key not in seen]:
+            self.connection_list.remove(self._connections.pop(key))
+        total = sum(row["count"] for row in rows or [])
+        if rows is None and status.get("state") != "stopped":
+            self.connections_count.set_text("needs a newer service")
+        else:
+            self.connections_count.set_text(f"{total} open" if total else "")
+
+    def _on_exclude(self, row):
+        entry = row.entry
+        row.button.set_sensitive(False)
+        self.connections_note.hide()
+
+        def done(_cfg, error):
+            row.button.set_sensitive(True)
+            if error is not None:
+                self.connections_note.set_text(f"Could not exclude {entry}: {error}")
+                self.connections_note.show()
+            self.poll()
+            return False
+
+        self.worker.submit(lambda client: client.exclude(add=[entry]), done)
 
     def _note(self, text):
         self.servers_note.set_text(text or "")
@@ -976,6 +1113,23 @@ class Panel:
         page.pack_start(_label("Nothing is sent while the proxy comes out in one of these countries.",
                                "pw-key", wrap=True), False, False, 0)
 
+        section("APPEARANCE")
+        segment = Gtk.Box()
+        segment.get_style_context().add_class("pw-seg")
+        self.look_buttons = {}
+        first = None
+        for choice, title, tip in (("system", "System", "Follow the desktop: dark when it is dark, light when it is light"),
+                                   ("light", "Light", None), ("dark", "Dark", None)):
+            button = Gtk.RadioButton.new_with_label_from_widget(first, title)
+            first = first or button
+            button.set_mode(False)
+            button.set_tooltip_text(tip)
+            button.set_active(choice == (_appearance.choice if _appearance else "system"))
+            button.connect("toggled", self._on_look, choice)
+            segment.pack_start(button, True, True, 0)
+            self.look_buttons[choice] = button
+        page.pack_start(segment, False, False, 0)
+
         section("OPTIONS")
         options = _card()
 
@@ -1017,6 +1171,10 @@ class Panel:
         outer.pack_start(scroller, True, True, 0)
         outer.pack_start(bottom, False, False, 0)
         return outer
+
+    def _on_look(self, button, choice):
+        if button.get_active() and _appearance is not None and choice != _appearance.choice:
+            _appearance.set_choice(choice)   # takes effect at once; no need to press Save
 
     # ------------------------------------------------------------ countries page
     def _build_countries(self):
@@ -1164,6 +1322,7 @@ class Panel:
         for value in self.values.values():
             value.set_text("—")
         self._render_servers({"state": "stopped"})
+        self._render_connections({"state": "stopped"})
         self._render_location({}, "stopped")
         self.kill_switch.set_sensitive(False)
         self.footer.set_text("")
@@ -1201,6 +1360,7 @@ class Panel:
         context = self.values["internet"].get_style_context()
         (context.add_class if internet == "No answer" else context.remove_class)("pw-bad")
         self._render_servers(status)
+        self._render_connections(status)
         self._render_location(status, state)
 
         blocked = status.get("blocked_countries") or []
@@ -1487,11 +1647,93 @@ class Panel:
         return False
 
 
-def load_css():
-    provider = Gtk.CssProvider()
-    provider.load_from_path(os.path.join(HERE, "style.css"))
-    Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), provider,
-                                             Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 1)
+class Appearance:
+    """The light or dark look of the window: the user's choice, or what the desktop asks for."""
+
+    PORTAL = ("org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop", "org.freedesktop.portal.Settings")
+    SCHEME = ("org.freedesktop.appearance", "color-scheme")
+
+    def __init__(self, choice=None):
+        self.choice = choice or theme.load_choice()
+        self.look = None
+        self.listeners = []            # called after the look has changed
+        self._provider = Gtk.CssProvider()
+        self._settings = Gtk.Settings.get_default()
+        self._scheme = None            # the desktop portal's answer: 1 dark, 2 light, 0 no opinion
+        self._portal = None
+        # What the desktop said before this program set anything itself.
+        self._prefers_dark = bool(self._settings and self._settings.get_property("gtk-application-prefer-dark-theme"))
+        screen = Gdk.Screen.get_default()
+        if screen is not None:
+            Gtk.StyleContext.add_provider_for_screen(screen, self._provider,
+                                                     Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 1)
+        self._watch_desktop()
+        self.apply()
+
+    def _watch_desktop(self):
+        if self._settings is not None:
+            self._settings.connect("notify::gtk-theme-name", lambda *_: self.apply())
+        try:
+            self._portal = Gio.DBusProxy.new_for_bus_sync(
+                Gio.BusType.SESSION, Gio.DBusProxyFlags.DO_NOT_AUTO_START, None, *self.PORTAL, None)
+            reply = self._portal.call_sync("Read", GLib.Variant("(ss)", self.SCHEME),
+                                           Gio.DBusCallFlags.NONE, 1000, None)
+            self._scheme = self._number(reply.unpack()[0])
+            self._portal.connect("g-signal", self._on_portal_signal)
+        except GLib.Error:
+            self._portal = None        # no portal on this desktop: the GTK theme decides
+
+    @staticmethod
+    def _number(value):
+        while isinstance(value, GLib.Variant):
+            value = value.unpack()
+        return value if isinstance(value, int) else None
+
+    def _on_portal_signal(self, _proxy, _sender, signal, parameters):
+        if signal == "SettingChanged":
+            namespace, key, value = parameters.unpack()
+            if (namespace, key) == self.SCHEME:
+                self._scheme = self._number(value)
+                self.apply()
+
+    def system_dark(self):
+        name = self._settings.get_property("gtk-theme-name") if self._settings is not None else ""
+        return theme.system_is_dark(self._scheme, name, self._prefers_dark)
+
+    def set_choice(self, choice):
+        """Change the look now and remember it for the next start."""
+        self.choice = choice
+        try:
+            theme.save_choice(choice)
+        except OSError:
+            pass                       # still applies for this session
+        self.apply()
+
+    def apply(self):
+        global _look
+        look = theme.resolve(self.choice, self.system_dark())
+        if look == self.look:
+            return
+        self.look = _look = look
+        if self._settings is not None:  # stock parts (dialogs, menus) follow where the theme can
+            self._settings.set_property("gtk-application-prefer-dark-theme", look == "dark")
+        self._provider.load_from_data(theme.stylesheet(look).encode("utf-8"))
+        for listener in self.listeners:
+            listener()
+
+
+_appearance = None
+
+
+def load_css(choice=None):
+    """Style the application. Returns the Appearance that keeps the look current."""
+    global _appearance
+    if _appearance is None:
+        _appearance = Appearance(choice)
+    elif choice and choice != _appearance.choice:
+        _appearance.choice = choice
+        _appearance.apply()
+    return _appearance
 
 
 class Tray:
@@ -1584,10 +1826,7 @@ class Application(Gtk.Application):
 
     def do_startup(self):
         Gtk.Application.do_startup(self)
-        settings = Gtk.Settings.get_default()
-        if settings is not None:
-            settings.set_property("gtk-application-prefer-dark-theme", True)
-        load_css()
+        load_css().listeners.append(lambda: self.window and self.window.queue_draw())
         app_icon = icon_path("proxywall")
         if app_icon:
             try:

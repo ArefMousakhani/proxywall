@@ -47,7 +47,7 @@
 </div>
 
 ```sh
-sudo apt install ./proxywall_1.3.1_all.deb
+sudo apt install ./proxywall_1.4.0_all.deb
 ```
 
 <div dir="rtl">
@@ -60,7 +60,7 @@ sudo apt install ./proxywall_1.3.1_all.deb
 git clone https://github.com/ArefMousakhani/proxywall.git
 cd proxywall
 make deb
-sudo apt install ./dist/proxywall_1.3.1_all.deb
+sudo apt install ./dist/proxywall_1.4.0_all.deb
 ```
 
 <div dir="rtl">
@@ -83,6 +83,8 @@ sudo apt install ./dist/proxywall_1.3.1_all.deb
 
 بستن پنجره اتصال را قطع نمی‌کند. اتصال را یک سرویس سیستمی نگه می‌دارد.
 
+ظاهر برنامه روشن و تیره دارد. به‌طور پیش‌فرض از تنظیم سیستم پیروی می‌کند؛ در `Settings → Appearance` می‌توانید `System`، `Light` یا `Dark` را انتخاب کنید.
+
 ## فهرست استثنا
 
 در بخش `Bypass the proxy` هر خط یک مورد بنویسید:
@@ -93,6 +95,8 @@ sudo apt install ./dist/proxywall_1.3.1_all.deb
 | `example.com` | خودِ دامنه و همه‌ی زیردامنه‌ها |
 | `192.0.2.10` | یک آدرس |
 | `10.1.0.0/16` | یک شبکه |
+
+راه سریع‌تر: در پنجره‌ی اصلی، کادر `Open connections` نشان می‌دهد برنامه‌های شما همین حالا به کدام سایت‌ها وصل‌اند؛ هر سایت یک سطر. دکمه‌ی `Exclude` آن سایت را به فهرست استثنا اضافه و ذخیره می‌کند، اتصال‌های بازِ آن بسته می‌شوند و برنامه بلافاصله بدون پروکسی دوباره وصل می‌شود. دستور `proxywall connections` همین فهرست را در ترمینال چاپ می‌کند.
 
 ## خط فرمان
 

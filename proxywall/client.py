@@ -61,6 +61,10 @@ class Client:
     def set_config(self, patch):
         return self.request("set_config", config=patch)["config"]
 
+    def exclude(self, add=(), remove=()):
+        """Change the list of destinations that bypass the proxy. Returns the configuration."""
+        return self.request("exclude", add=list(add), remove=list(remove))["config"]
+
     def server_save(self, server_id=None, name=None, proxy=None):
         """Add (no id) or change a saved server. Returns its id."""
         return self.request("server_save", id=server_id, name=name, proxy=proxy)["id"]

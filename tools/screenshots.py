@@ -41,14 +41,26 @@ TESTS = {
     "s5": test(None, state="testing"),
     "s6": test(None, reach=None, error="the server does not answer (timed out)"),
 }
+def site(host, count, down, up, pending=0, route="proxy", names=()):
+    return {"host": host, "route": route, "exclude": host, "count": count, "pending": pending, "up": up,
+            "down": down, "since": time.time(), "names": list(names)}
+
+
+CONNECTIONS = [
+    site("github.com", 3, 1_840_000, 96_000, names=("api.github.com", "github.com")),
+    site("google.com", 5, 412_000, 38_000, pending=1, names=("mail.google.com", "www.google.com")),
+    site("shop.ir", 2, 96_000, 12_000, route="direct"),
+    site("wikipedia.org", 1, 0, 0, pending=1),
+    site("youtube.com", 3, 26_400_000, 310_000),
+]
 BASE = {"version": gui.__version__, "enabled": True, "kill_switch": True, "allow_lan": True, "firewall_active": True,
         "proxy": "vless://de.example.com:443", "proxy_configured": True, "since": 0, "latency_ms": 48,
         "internet_ms": 182, "internet_ok": True, "test_host": "www.google.com",
         "public_ip": "203.0.113.42", "country": "DE", "country_name": "Germany", "city": "Frankfurt",
         "latitude": 50.1109, "longitude": 8.6821, "location_exact": True,
         "error": None, "stats": STATS, "excluded": 2, "blocked_countries": ["IR"],
-        "servers": SERVERS, "active_server": "s1", "tests": TESTS}
-IDLE = dict(public_ip=None, latency_ms=None, internet_ms=None, internet_ok=None)
+        "servers": SERVERS, "active_server": "s1", "tests": TESTS, "connections": CONNECTIONS}
+IDLE = dict(public_ip=None, latency_ms=None, internet_ms=None, internet_ok=None, connections=[])
 SCENES = {
     "connected": dict(BASE, state="connected"),
     "connecting": dict(BASE, state="connecting", **IDLE),
@@ -147,9 +159,7 @@ def tray_strip(out_dir):
 def main():
     out_dir = sys.argv[1] if len(sys.argv) > 1 else "."
     os.makedirs(out_dir, exist_ok=True)
-    settings = Gtk.Settings.get_default()
-    settings.set_property("gtk-application-prefer-dark-theme", True)
-    gui.load_css()
+    gui.load_css("dark")
     for name, status in SCENES.items():
         shoot(name, out_dir, status=status)
     connected = SCENES["connected"]
@@ -160,6 +170,8 @@ def main():
     shoot("empty", out_dir, status=dict(SCENES["off"], servers=[], tests={}, active_server="", proxy="",
                                         proxy_configured=False))
     tray_strip(out_dir)
+    gui.load_css("light")                       # the same window in the light look
+    shoot("connected-light", out_dir, status=connected)
 
 
 if __name__ == "__main__":

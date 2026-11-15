@@ -4,6 +4,19 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.0] - 2026-11-15
+
+### Added
+
+- **Open connections**: a box in the main window that lists what your programs are connected to right now, one row per site, with the number of connections, whether they are still connecting, and their traffic. Only connections that are open are shown; nothing is recorded.
+- **Exclude** on a row adds the site to the bypass list and saves it. Its open connections are cut, so the program reconnects outside the proxy at once.
+- `proxywall connections` prints the same list in a terminal.
+- **Light and dark looks.** The window follows the desktop's light or dark preference and changes with it; *Settings → Appearance* fixes it to Light or Dark. The choice applies at once and is remembered per user (`~/.config/proxywall/gui.json`).
+
+### Changed
+
+- Any change to the bypass list (window, command line or configuration) now takes effect on connections that are already open: those the new list covers are cut and reconnect directly.
+
 ## [1.3.1] - 2026-11-15
 
 ### Fixed
@@ -60,6 +73,7 @@ First release.
 - GTK 3 desktop interface with tray icon, `proxywall` command line tool.
 - Debian package with a sandboxed systemd service.
 
+[1.4.0]: https://github.com/ArefMousakhani/proxywall/releases/tag/v1.4.0
 [1.3.1]: https://github.com/ArefMousakhani/proxywall/releases/tag/v1.3.1
 [1.3.0]: https://github.com/ArefMousakhani/proxywall/releases/tag/v1.3.0
 [1.2.0]: https://github.com/ArefMousakhani/proxywall/releases/tag/v1.2.0

@@ -969,6 +969,46 @@ class NetnsTest(unittest.TestCase):
         self.assertEqual(self.state(), "connected")                   # a slow test page is not a dead proxy
         self.assert_proxied("www.example.com")
 
+    def test_55_open_connections_are_listed_and_can_be_excluded(self):
+        self.reset()
+
+        def row(route="proxy"):
+            return next((item for item in self.client.status()["connections"]
+                         if item["host"] == "example.com" and item["route"] == route), None)
+
+        self.assertIsNone(row())
+        held = [socket.create_connection((host, 80), timeout=5) for host in ("www.example.com", "big.example.com")]
+        for sock in held:
+            self.addCleanup(sock.close)
+        self.wait_for(lambda: (row() or {}).get("count") == 2 and row()["pending"] == 0, "both connections to be open")
+        found = row()
+        self.assertEqual(found["names"], ["big.example.com", "www.example.com"])
+        self.assertEqual(found["exclude"], "example.com")
+        held[0].sendall(b"GET / HTTP/1.1\r\nHost: www.example.com\r\n\r\n")
+        self.assertTrue(held[0].recv(4096))
+        self.wait_for(lambda: row()["up"] > 0 and row()["down"] > 0, "the traffic of the row to be counted")
+
+        mark = self.mark()
+        saved = self.client.exclude(add=[found["exclude"]])           # what the Exclude button does
+        self.assertIn("example.com", saved["exclude"])
+        for sock in held:                                             # open connections do not stay on the proxy
+            sock.settimeout(5)
+            try:
+                self.assertEqual(sock.recv(100), b"")
+            except OSError:
+                pass
+        self.wait_for(lambda: row() is None, "the proxied connections to be gone")
+        self.assert_direct("www.example.com")                         # from now on: straight out
+        self.assert_direct("big.example.com")
+        self.assertFalse([line for line in self.since(mark) if "example.com" in line and "socks" in line])
+        direct = socket.create_connection(("www.example.com", 80), timeout=5)
+        self.addCleanup(direct.close)
+        self.wait_for(lambda: (row("direct") or {}).get("count") == 1, "the direct connection to be listed")
+        self.assert_proxied("93.184.216.34")                        # everything else is untouched
+
+        self.client.exclude(remove=["example.com"])
+        self.assert_proxied("www.example.com")
+
     def test_54_helper_ports_are_closed_to_other_programs(self):
         self.reset()
         first = self.client.get_config()["engine_port"]

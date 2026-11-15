@@ -1,5 +1,5 @@
 """ProxyWall - system-wide SOCKS5/HTTP proxy client with a fail-closed firewall."""
 
-__version__ = "1.3.1"
+__version__ = "1.4.0"
 APP_NAME = "ProxyWall"
 APP_ID = "io.github.proxywall.ProxyWall"

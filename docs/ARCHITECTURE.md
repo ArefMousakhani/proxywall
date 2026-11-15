@@ -118,6 +118,12 @@ The configuration holds a list of servers; `proxy` is a copy of the one named by
 
 `tester.py` measures servers on request, up to four at a time: a TCP connection to the server, the exit country through it, and `test_url` through it. Helpers for SSH and share-link servers run on `engine_port+1 … +9`, which the firewall guards like `engine_port` itself. Results live in memory only and are dropped when a server is edited.
 
+### Open connections
+
+The relay keeps one small record per connection it is carrying: the name the application asked for (from the placeholder address, or read from the first bytes), whether it goes through the proxy or directly, whether the outbound leg is still being opened, and the bytes in each direction. `status` reports them as `connections`, grouped by site and route; host names are grouped under their domain by a rule of thumb (`rules.base_domain`: two labels, three under `co.uk`-style suffixes), not the public suffix list. Nothing is kept once a connection closes: there is no history.
+
+The `exclude` command adds or removes bypass entries in one step. Whenever the exclusion list changes, the relay cancels the proxied connections the new list covers, so the application reconnects at once and the new connection takes the direct path.
+
 ### Country gate
 
 When `blocked_countries` is set, the monitor is also a gate. `tproxy.py` (and the DNS server, for lookups it forwards through the proxy) calls `Monitor.permit()` before every dial to the proxy. It answers yes only on the strength of a check that started no longer than `country_check_seconds` ago and found the exit outside every blocked country; otherwise the caller waits for a check that is new enough, and gets no if that check fails, times out, or finds no country at all. A positive answer is never carried over a change of proxy, a loss of the proxy or a change of the list: each of those cancels the running check and resets the verdict. Finding a blocked country cancels every relay task that is using the proxy.

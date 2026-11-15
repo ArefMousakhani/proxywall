@@ -55,6 +55,22 @@ def normalize_domain(text):
     return name
 
 
+# Registries that hand out names one level down (example.co.uk, example.ac.ir).
+_SECOND_LEVEL = frozenset(("ac", "co", "com", "edu", "go", "gov", "id", "mil", "ne", "net", "nom", "or", "org", "sch"))
+
+
+def base_domain(name):
+    """The domain a host name belongs to: ``mail.google.com`` -> ``google.com``.
+
+    A rule of thumb, not the public suffix list: two labels, or three under a
+    two-letter country code with a generic second level (``bbc.co.uk``). Used
+    to group open connections and to offer one exclusion for a whole site.
+    """
+    labels = name.lower().rstrip(".").split(".")
+    keep = 3 if len(labels[-1]) == 2 and len(labels) > 2 and labels[-2] in _SECOND_LEVEL else 2
+    return ".".join(labels[-keep:])
+
+
 def is_hostname(name):
     """True if *name* (already lower-case) can be handed to a proxy as a host."""
     return 0 < len(name) <= 253 and all(_LABEL_RE.match(label) for label in name.split("."))

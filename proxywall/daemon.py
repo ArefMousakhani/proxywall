@@ -18,7 +18,7 @@ from .engine import Engine
 from .fakeip import FakeIPPool
 from .monitor import Monitor
 from .resolver import DirectResolver, ResolveError, exchange_over_stream
-from .rules import ExcludeRules
+from .rules import ExcludeRules, normalize_entry
 from .tester import Tester
 from .tproxy import TransparentProxy
 
@@ -275,6 +275,7 @@ class Core:
                 if self.enabled else None),
             "stats": dict(self.stats),
             "excluded": len(self.cfg["exclude"]),
+            "connections": self.tproxy.connections(),
         }
 
     async def cmd_get_config(self, _request):
@@ -284,6 +285,20 @@ class Core:
         patch = request.get("config")
         async with self._lock:
             return await self._apply(config.validate(config.merge(self.cfg, patch)))
+
+    async def cmd_exclude(self, request):
+        """Add entries to, or remove them from, the list of destinations that bypass the proxy."""
+        add, remove = request.get("add") or [], request.get("remove") or []
+        for entries in (add, remove):
+            if not isinstance(entries, list) or not all(isinstance(item, str) for item in entries):
+                raise CommandError("'add' and 'remove' must be lists of entries")
+        try:
+            gone = {normalize_entry(entry)[2].lstrip("*.") for entry in remove}
+        except ValueError as exc:
+            raise CommandError(str(exc)) from None
+        async with self._lock:
+            kept = [entry for entry in self.cfg["exclude"] if entry.lstrip("*.") not in gone]
+            return await self._apply(config.validate(config.merge(self.cfg, {"exclude": kept + add})))
 
     async def cmd_server_save(self, request):
         """Add a server (no `id`) or change one. Secrets sent as null are kept."""
@@ -320,6 +335,7 @@ class Core:
         if self.enabled and not new["proxy"]["host"]:
             raise config.ConfigError("disconnect before removing the proxy")
         proxy_changed = new["proxy"] != self.cfg["proxy"]
+        exclusions_changed = (new["exclude"], new["allow_lan"]) != (self.cfg["exclude"], self.cfg["allow_lan"])
         gate_changed = any(new[key] != self.cfg[key] for key in (
             "blocked_countries", "country_check_seconds", "ip_check_url", "geo_url", "test_url"))
         ports_changed = (new["tcp_port"], new["dns_port"], new["fwmark"]) != (
@@ -339,6 +355,8 @@ class Core:
                 self.tproxy.close_connections(proxied_only=True)  # they belong to the old server
         elif gate_changed:
             self.monitor.policy_changed()
+        if exclusions_changed:
+            self.tproxy.close_excluded()  # what is excluded now reconnects outside the proxy
         log.info("configuration updated")
         return {"config": config.public_view(self.cfg)}
 

@@ -147,6 +147,23 @@ def cmd_exclude(client, args):
     return 0
 
 
+def cmd_connections(client, args):
+    """Open connections by site (`proxywall exclude add SITE` sends one outside the proxy)."""
+    rows = client.status().get("connections")
+    if rows is None:
+        print("the running service is too old to list connections: restart it", file=sys.stderr)
+        return 1
+    if not rows:
+        print("(no open connections)")
+        return 0
+    width = max(len(row["host"]) for row in rows)
+    for row in rows:
+        state = "connecting" if row["pending"] == row["count"] else "open"
+        print(f"{row['host']:<{width}}  {row['count']:>3}  {state:<10}  {row['route']:<6}  "
+              f"down {human_bytes(row['down'])}, up {human_bytes(row['up'])}")
+    return 0
+
+
 def country_code(text):
     """`ir`, `IR` or `Iran` -> `IR`. Raises ConfigError for anything unknown."""
     wanted = text.strip()
@@ -327,6 +344,9 @@ def build_parser():
     p.add_argument("action", choices=("list", "add", "remove"))
     p.add_argument("entries", nargs="*", metavar="ENTRY", help="domain (*.ir), IP or network (10.0.0.0/8)")
     p.set_defaults(func=cmd_exclude)
+
+    p = sub.add_parser("connections", help="show the connections that are open right now, by site")
+    p.set_defaults(func=cmd_connections)
 
     p = sub.add_parser("server", help="saved servers: list, add, use, remove, test")
     p.add_argument("action", choices=("list", "add", "use", "remove", "test"))

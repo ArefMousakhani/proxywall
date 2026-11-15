@@ -5,6 +5,7 @@ import base64
 import ipaddress
 import json
 import os
+import re
 import shutil
 import socket
 import ssl
@@ -13,11 +14,12 @@ import subprocess
 import tempfile
 import unittest
 
-from proxywall import config, dnsmsg, firewall, geo, links, monitor, upstream
+from proxywall import config, dnsmsg, firewall, geo, links, monitor, tproxy, upstream
 from proxywall.fakeip import FakeIPPool
 from proxywall.geodata import COUNTRIES, LAND
+from proxywall.gui import theme
 from proxywall.monitor import parse_ip_reply
-from proxywall.rules import ExcludeRules, is_local_name, normalize_entry, normalize_list
+from proxywall.rules import ExcludeRules, base_domain, is_local_name, normalize_entry, normalize_list
 from proxywall.tproxy import parse_http_host, parse_sni
 
 
@@ -660,6 +662,115 @@ class MonitorLocationTest(unittest.TestCase):
         watch.public_ip = watch.country = None
         place = watch.location()
         self.assertEqual((place["country"], place["latitude"], place["city"]), (None, None, None))
+
+
+class ThemeTest(unittest.TestCase):
+    """Light and dark looks: complete palettes, the saved choice, and following the desktop."""
+
+    def test_both_looks_define_every_colour_the_stylesheet_uses(self):
+        with open(theme.STYLE_FILE, encoding="utf-8") as handle:
+            style = handle.read()
+        used = set(re.findall(r"@(pw_[a-z_]+)", style))
+        self.assertGreater(len(used), 10)
+        for look in ("dark", "light"):
+            self.assertFalse(used - set(theme.PALETTES[look]), look)
+            css = theme.stylesheet(look)
+            self.assertTrue(css.startswith("@define-color "))
+            self.assertIn(f"@define-color pw_bg {theme.PALETTES[look]['pw_bg']};", css)
+            self.assertIn(".pw-root", css)
+        self.assertEqual(set(theme.PALETTES["dark"]), set(theme.PALETTES["light"]))
+        self.assertEqual(set(theme.DRAWING["dark"]), set(theme.DRAWING["light"]))
+        # The stylesheet itself holds no colour of one look: only white text on coloured controls.
+        literals = set(re.findall(r"#[0-9a-fA-F]{3,8}\b", style))
+        self.assertEqual(literals, {"#ffffff"})
+
+    def test_system_follows_the_desktop(self):
+        self.assertTrue(theme.system_is_dark(1, "Adwaita", False))          # the portal's word comes first
+        self.assertFalse(theme.system_is_dark(2, "Adwaita-dark", True))
+        self.assertTrue(theme.system_is_dark(0, "Mint-Y-Dark-Aqua", False))  # no opinion: the GTK theme decides
+        self.assertTrue(theme.system_is_dark(None, "Adwaita", True))
+        self.assertFalse(theme.system_is_dark(None, "Adwaita", False))
+        self.assertFalse(theme.system_is_dark(None, None, False))
+        self.assertEqual(theme.resolve("system", True), "dark")
+        self.assertEqual(theme.resolve("system", False), "light")
+        self.assertEqual(theme.resolve("light", True), "light")
+        self.assertEqual(theme.resolve("dark", False), "dark")
+
+    def test_the_choice_is_remembered(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "deep", "gui.json")
+            self.assertEqual(theme.load_choice(path), "system")             # nothing saved yet
+            for choice in ("light", "dark", "system"):
+                theme.save_choice(choice, path)
+                self.assertEqual(theme.load_choice(path), choice)
+            with self.assertRaises(ValueError):
+                theme.save_choice("pink", path)
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write('{"theme": "pink", "other": 1}')
+            self.assertEqual(theme.load_choice(path), "system")             # nonsense is not a choice
+            theme.save_choice("dark", path)                                 # other keys in the file are kept
+            with open(path, encoding="utf-8") as handle:
+                self.assertEqual(json.load(handle), {"theme": "dark", "other": 1})
+            for broken in ("", "[1, 2]", "{not json"):
+                with open(path, "w", encoding="utf-8") as handle:
+                    handle.write(broken)
+                self.assertEqual(theme.load_choice(path), "system")
+            theme.save_choice("light", path)
+            self.assertEqual(theme.load_choice(path), "light")
+
+
+class OpenConnectionsTest(unittest.TestCase):
+    """The list of open connections: one row per site and route, and exclusions that take effect at once."""
+
+    class Task:
+        def __init__(self):
+            self.cancelled = False
+
+        def cancel(self):
+            self.cancelled = True
+
+    def relay(self, exclude=()):
+        class Core:
+            rules = ExcludeRules(exclude, allow_lan=False)
+
+        relay = tproxy.TransparentProxy(Core())
+        self.tasks = {}
+        for host, named, direct, pending, up, down in (
+                ("www.google.com", True, False, False, 100, 2000),
+                ("mail.google.com", True, False, True, 0, 0),
+                ("news.bbc.co.uk", True, False, False, 10, 20),
+                ("93.184.216.34", False, False, True, 0, 0),
+                ("shop.ir", True, True, False, 1, 2)):
+            task = self.tasks[host] = self.Task()
+            relay._open[task] = {"host": host, "named": named, "direct": direct, "pending": pending,
+                                 "since": 1000.0 + len(self.tasks), "up": up, "down": down}
+        return relay
+
+    def test_sites_are_grouped_under_their_domain(self):
+        self.assertEqual([base_domain(name) for name in (
+            "google.com", "mail.google.com", "a.b.example.org", "news.bbc.co.uk", "bbc.co.uk", "x.ac.ir",
+            "www.shop.ir", "co.uk", "localhost", "WWW.Example.COM.")],
+            ["google.com", "google.com", "example.org", "bbc.co.uk", "bbc.co.uk", "x.ac.ir",
+             "shop.ir", "co.uk", "localhost", "example.com"])
+        rows = {row["host"]: row for row in self.relay().connections()}
+        self.assertEqual(list(rows), ["93.184.216.34", "bbc.co.uk", "google.com", "shop.ir"])
+        google = rows["google.com"]
+        self.assertEqual((google["count"], google["pending"], google["up"], google["down"], google["route"]),
+                         (2, 1, 100, 2000, "proxy"))
+        self.assertEqual(google["names"], ["mail.google.com", "www.google.com"])
+        self.assertEqual(google["since"], 1001.0)
+        self.assertEqual((rows["93.184.216.34"]["exclude"], rows["93.184.216.34"]["pending"]), ("93.184.216.34", 1))
+        self.assertEqual(rows["shop.ir"]["route"], "direct")
+        for row in rows.values():                                # every "exclude" is a valid entry
+            normalize_entry(row["exclude"])
+        self.assertEqual(len(self.relay().connections(limit=2)), 2)
+        json.dumps(self.relay().connections())                   # goes over the control socket
+
+    def test_a_new_exclusion_cuts_what_it_now_covers(self):
+        relay = self.relay(["google.com", "93.184.216.0/24"])
+        relay.close_excluded()
+        cut = sorted(host for host, task in self.tasks.items() if task.cancelled)
+        self.assertEqual(cut, ["93.184.216.34", "mail.google.com", "www.google.com"])   # not what was direct already
 
 
 class CountryGateTest(unittest.TestCase):
